@@ -1,0 +1,88 @@
+# ============================================================
+# 0. 每个新终端先加载环境
+# ============================================================
+source /opt/ros/humble/setup.bash
+source ~/x86_ros2_ws/install/setup.bash
+export LD_LIBRARY_PATH="$HOME/scut_weld_sdk_install/lib:$LD_LIBRARY_PATH"
+
+# 查看节点/话题/服务
+ros2 node list
+ros2 topic list -t
+ros2 service list -t
+
+# ============================================================
+# 1. 编译（需先安装 weld SDK，CAN 包还需 controlcan SDK）
+# ============================================================
+cd ~/x86_ros2_ws
+export CMAKE_PREFIX_PATH="$HOME/scut_weld_sdk_install:$CMAKE_PREFIX_PATH"
+export CHISHINE_3D_CAMERA_SDK_ROOT="$HOME/x86_chishine_camera_test/vendor_sdk"
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# CAN SDK 未就绪时先构建其他包
+colcon build --symlink-install --packages-select cimc chishine_camera_ros2 weld_seam_perception --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 2. 偏心旋转焊枪电机
+# ============================================================
+ros2 run cimc motor_control_node
+ros2 topic pub --once /cimc/motor_speed std_msgs/msg/Float32 "{data: 3.0}"
+ros2 topic pub --once /cimc/motor_speed std_msgs/msg/Float32 "{data: 0.0}"
+
+# 临时改串口
+ros2 run cimc motor_control_node --ros-args -p serial_port:=/dev/ttyUSB0 -p baud_rate:=115200
+
+# ============================================================
+# 3. ABB 数据接收/转发
+# ============================================================
+ros2 run cimc data_receiver_node
+ros2 run cimc data_receiver_node --ros-args -p listen_host:=192.168.125.2 -p abb_allowed_ip:=192.168.125.1 -p forward_ip:=192.168.125.5
+ros2 topic echo /abb/raw_text
+ros2 topic echo /abb/weld_point
+
+# ============================================================
+# 4. 焊机 USB-CAN 节点
+# ============================================================
+ros2 run weld_controller weld_controller_node
+ros2 topic echo /weld/status
+ros2 topic pub --once /weld/control std_msgs/msg/String "{data: 'start_system'}"
+ros2 topic pub --once /weld/set_param_real std_msgs/msg/Float32MultiArray "{data: [230.0, 22.0]}"
+ros2 topic pub --once /weld/control std_msgs/msg/String "{data: 'start_gas'}"
+ros2 topic pub --once /weld/control std_msgs/msg/String "{data: 'wire_forward'}"
+ros2 topic pub --once /weld/control std_msgs/msg/String "{data: 'wire_backward'}"
+ros2 topic pub --once /weld/control std_msgs/msg/String "{data: 'start_welding'}"
+ros2 topic pub --once /weld/control std_msgs/msg/String "{data: 'stop_welding'}"
+
+# ============================================================
+# 5. 相机节点
+# ============================================================
+ros2 run chishine_camera_ros2 chishine_camera_node --ros-args --params-file ~/x86_ros2_ws/src/chishine_camera_ros2/config/camera.yaml
+ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
+ros2 topic echo --once /camera/pointcloud_file
+
+# ============================================================
+# 6. 焊缝提取节点
+# ============================================================
+ros2 run weld_seam_perception weld_seam_node --ros-args --params-file ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
+ros2 topic pub --once /camera/pointcloud_file std_msgs/msg/String "{data: '/absolute/sample.ply'}"
+ros2 service call /weld_seam/extract_latest std_srvs/srv/Trigger "{}"
+ros2 topic echo --once /weld_seam/result_csv
+ros2 topic echo --once /weld_seam/result_visualization
+ros2 topic echo /weld_seam/status
+ros2 topic echo --once /weld_seam/poses_camera_frame
+
+# ============================================================
+# 7. weld_logic_node（前期不运行；以下命令保留供后续验证）
+# ============================================================
+# ros2 run weld_controller weld_logic_node
+ros2 topic echo /abb/raw_text
+ros2 topic echo /weld/control
+ros2 topic echo /weld/set_param_real
+ros2 topic echo /cimc/motor_speed
+ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'MODE_MANUAL'}"
+ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'MODE_AUTO'}"
+ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'ESTOP'}"
+ros2 topic pub --once /cimc/override_param std_msgs/msg/Float32MultiArray "{data: [280.0, 26.5, 3.0]}"
+ros2 topic pub -r 10 /cimc/override_param std_msgs/msg/Float32MultiArray "{data: [250.0, 25.0, 2.5]}"
+ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'USE_CALC'}"
+ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'USE_BUILTIN'}"
