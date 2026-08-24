@@ -67,7 +67,7 @@ flowchart LR
 | ABB 自动接收/发送 | 保留接口；本轮无机械臂通信测试不启动 |
 | 焊机、旋弧电机、固定点号工艺逻辑 | 与动态焊缝轨迹尚未闭环；本轮不启动 |
 
-当前有意保留两个验证层次：先直接调用 `/camera/capture` 验证相机和算法，再通过模拟 `START_CAPTURE` 触发第二次拍照，验证任务协调及手眼变换。后一阶段不能复用第一次拍照前随意填写的 TCP 位姿。
+下一次现场主流程只执行一次完整任务：全部计算节点先就绪，再模拟 `START_CAPTURE`，由协调节点触发唯一一次拍照、焊缝提取和手眼变换。直接调用 `/camera/capture` 只保留作相机/算法独立排障，不插入主流程。
 
 ## 3. 为什么 ROS 2 不启动算法可执行文件
 
@@ -334,9 +334,9 @@ ros2 topic echo --once --qos-durability transient_local \
   --qos-reliability reliable /abb/trajectory_tcp
 ```
 
-## 11. 相机到算法的一次完整测试
+## 11. 相机到算法的独立排障流程（不插入本次主流程）
 
-先启动 `weld_seam_node`，再启动 `chishine_camera_node`，最后调用：
+只有在完整任务失败、需要隔离相机或算法问题时，才先启动 `weld_seam_node` 和 `chishine_camera_node`，再单独调用：
 
 ```bash
 ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
@@ -350,24 +350,31 @@ ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
 4. `weld_results/` 生成 CSV、精确点 PLY、粉红十字可视化 PLY；
 5. 发布相机坐标系下 PoseArray 和 JSON 状态。
 
+这条命令会额外产生一帧和一次算法结果，因此正常现场主流程不执行它。
+
 ## 12. 下一次现场无机械臂验证计划
 
 相机固定在机械臂末端，但本轮不连接 ABB TCP、不让程序控制机械臂。完整命令已按终端和顺序写入 `order.txt`，总体流程为：
 
 1. 启动 `x86_chishine_live_viewer`，用实时点云选择合适的静止拍照位置；可按 `S` 保存参考 PLY。查看器和当前 ROS 相机 YAML 的深度范围统一为 `100–600 mm`。
 2. 按 `Q`、`Esc` 或 `Ctrl+C` 完全关闭查看器，释放相机独占连接。
-3. 启动 ROS 相机节点和焊缝节点，直接调用一次 `/camera/capture`，确认自动生成 PLY、CSV、关键点和相机系姿态。
-4. 启动手眼桥，保持 `send_to_abb=false`；再启动任务协调节点。
-5. 从示教器抄录该静止拍照位置的基坐标 TCP：必须确认显示参考系确实是机器人 Base；如果显示的是工件/用户坐标系，或 `wobj0/world` 与 Base 不重合，不能直接填入。XYZ 使用 mm，姿态转换为代码要求的 `qw,qx,qy,qz`。
-6. 向 `/abb/raw_text` 模拟发布 `START_CAPTURE`。协调节点会再拍一帧，焊缝节点自动处理，手眼桥输出 `/abb/trajectory_tcp`。
-7. 检查输出 `frame_id=robot_base`。PoseArray 位置是 m，和示教器 mm 对比时乘 1000；ROS 显示四元数顺序为 `x,y,z,w`。
-8. 只有在确认坐标、姿态、点顺序、可达性和安全间隙后，才由操作者在示教器上低速、单点、禁弧手动验证。ROS 不发送任何运动命令。
+3. 启动 ROS 相机节点；它连接相机并等待软件触发，此时不主动生成 PLY。
+4. 启动焊缝节点并确认 `auto_process=true`；它等待新的 PLY 路径。
+5. 启动手眼桥，确认矩阵方向并保持 `send_to_abb=false`；再启动任务协调节点。
+6. 提前监听 `/weld_task/status`、`/weld_seam/status`、`/handeye_bridge/status` 和 `/abb/trajectory_tcp`，避免错过非保留状态。
+7. 从示教器再次读取该静止拍照位置的基坐标 TCP：必须确认显示参考系确实是机器人 Base；如果显示的是工件/用户坐标系，或 `wobj0/world` 与 Base 不重合，不能直接填入。XYZ 使用 mm，姿态转换为代码要求的 `qw,qx,qy,qz`。
+8. 向 `/abb/raw_text` 模拟发布一次 `START_CAPTURE`。协调节点触发唯一一次拍照；新 PLY 使焊缝节点自动提取一次，手眼桥随后输出 `/abb/trajectory_tcp`。
+9. 检查 PLY、CSV、可视化结果、相机系 PoseArray 和 `robot_base` PoseArray。位置和示教器 mm 对比时乘 1000；ROS 四元数显示顺序为 `x,y,z,w`。
+10. 只有在确认坐标、姿态、点顺序、可达性和安全间隙后，才由操作者在示教器上低速、单点、禁弧手动验证。ROS 不发送任何运动命令。
 
-第一次直接 `/camera/capture` 用于验证相机和算法；模拟 `START_CAPTURE` 会触发第二次正式任务拍照。这一安排保证 `Base_from_TCP` 与被手眼变换的点云来自同一个静止位置。
+这与真实任务从 `/abb/raw_text` 往后的节点链路一致。区别是本轮用 `ros2 topic pub` 代替 ABB TCP 和 `data_receiver_node`，因此尚未验证 ABB 网络接收、协议分帧、真实拍照时刻同步和返回发送。
 
 ## 13. 坐标、姿态和手眼变换
 
 - 算法 CSV 的位置单位是 mm；四元数按 `qw,qx,qy,qz` 保存。
+- 焊缝 SDK 先生成相机坐标系 CSV；`weld_seam_node` 随即重新打开该 CSV，只读取 `x,y,z,qw,qx,qy,qz`，把位置从 mm 转成 m，并发布 `/weld_seam/poses_camera_frame`。
+- `handeye_abb_bridge_node` 不读取 CSV 文件，而是订阅上述 PoseArray，对其中全部位姿逐点执行手眼变换，再发布 `robot_base` 下的 `/abb/trajectory_tcp`。当前不会另外生成一份基坐标系 CSV。
+- 当未来设置 `send_to_abb=true` 时，桥接节点会把 `/abb/trajectory_tcp` 中全部点转回 mm，按 `qw,qx,qy,qz` 序列化到 `/abb/tx_text`；`data_receiver_node` 再通过 ABB TCP 连接发送。本轮保持 `false`，不会发送。
 - `/weld_seam/poses_camera_frame` 按 ROS REP-103 把位置乘 `0.001` 变为 m，四元数不缩放，`frame_id=camera_link`。
 - 相机 SDK 直接使用深度相机内参生成 PLY：`x=(u-cx)z/fx`、`y=(v-cy)z/fy`、`z=depth`。因此 PLY 原点是深度相机的理想光心，X 随图像列向右、Y 随图像行向下、Z 沿深度方向向前。
 - 当前采集关闭 RGB，生成点云时没有应用 Depth-to-RGB 外参；所以手眼标定矩阵必须对应这个**深度光学坐标系**。如果标定使用的是 RGB 光心、相机外壳坐标系或其他坐标系，必须补上相应固定外参，不能只把话题 `frame_id` 改成 `camera_link`。

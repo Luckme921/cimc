@@ -132,7 +132,7 @@ cd ~/x86_ros2_ws/x86_chishine_live_viewer
 # 窗口操作：鼠标调整视角；S保存当前完整PLY；Q/Esc退出。
 # 查看器与当前ROS相机YAML的深度范围均为100～600 mm。
 # 选好机械臂静止拍照位置后，先记录示教器当前TCP，再按Q/Esc或Ctrl+C关闭查看器。
-# 从记录TCP到第9.8节触发第二次拍照期间，机械臂必须保持该位姿不动。
+# 从选定位置到第9.7节触发本次唯一一次任务拍照期间，机械臂必须保持不动。
 # 确认查看器已经完全退出，下面命令应无输出：
 pgrep -af chishine_live_viewer
 
@@ -152,26 +152,7 @@ ros2 run weld_seam_perception weld_seam_node --ros-args \
 ros2 param get /weld_seam_node auto_process
 
 # ------------------------------------------------------------
-# 9.4 终端D：第一次直接拍照，验证相机 -> PLY -> 焊缝自动提取
-# ------------------------------------------------------------
-# /weld_seam/status 不是保留话题。先在另一个终端运行下面命令等待本次结果：
-ros2 topic echo --once /weld_seam/status
-
-# 再回到本终端调用一次。焊缝节点应自动运行；不要再调用 extract_latest。
-ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
-
-# 完成后可读取以下保留话题。显式使用 transient_local，避免错过已发布数据：
-ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /camera/pointcloud_file
-ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /weld_seam/result_csv
-ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /weld_seam/result_visualization
-ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /weld_seam/poses_camera_frame
-
-# 也可检查数据目录中最新文件：
-ls -lt /home/mini/scut_weld_data/pointclouds | head
-ls -lt /home/mini/scut_weld_data/weld_results | head
-
-# ------------------------------------------------------------
-# 9.5 终端E：启动手眼桥，只计算robot_base轨迹，绝不发送ABB
+# 9.4 终端D：启动手眼桥，只计算robot_base轨迹，绝不发送ABB
 # ------------------------------------------------------------
 # 必须先确认标定矩阵方向，二选一：
 # 标定文件表示 TCP_from_Camera 时使用：
@@ -189,7 +170,7 @@ ros2 run cimc handeye_abb_bridge_node --ros-args \
   -p send_to_abb:=false
 
 # ------------------------------------------------------------
-# 9.6 终端F：启动一次任务协调节点
+# 9.5 终端E：启动一次任务协调节点
 # ------------------------------------------------------------
 ros2 run cimc weld_task_coordinator_node --ros-args \
   -p weld_auto_process:=true \
@@ -198,17 +179,19 @@ ros2 run cimc weld_task_coordinator_node --ros-args \
   -p base_frame_id:=robot_base
 
 # ------------------------------------------------------------
-# 9.7 终端G：先打开状态和结果监视，再发送模拟拍照位姿
+# 9.6 监视终端：先监听非保留状态和最终轨迹，再发送模拟消息
 # ------------------------------------------------------------
-# 建议分别开三个终端，先运行以下监视命令，等待下一次任务消息：
+# 建议分别开四个终端，先运行以下命令，等待本次任务消息：
 ros2 topic echo /weld_task/status
+ros2 topic echo /weld_seam/status
 ros2 topic echo /handeye_bridge/status
 ros2 topic echo --once /abb/trajectory_tcp
 
 # ------------------------------------------------------------
-# 9.8 终端H：模拟ABB发送拍照瞬间 Base_from_TCP，并触发第二次拍照
+# 9.7 触发终端：模拟ABB发送 Base_from_TCP，并触发唯一一次任务拍照
 # ------------------------------------------------------------
 # 必须把以下7个占位符替换成示教器在当前静止拍照位置显示的数据。
+# 发布前再次读取示教器，确保它仍是实际拍照位置的TCP位姿。
 # 必须确认示教器显示参考系是机器人Base；工件/用户坐标系数据不能直接填入。
 # 如果使用wobj0/world，还要确认它与当前机器人Base是否重合。
 # XYZ单位mm；代码输入四元数顺序为 qw,qx,qy,qz。
@@ -219,15 +202,21 @@ ros2 topic pub --once /abb/raw_text std_msgs/msg/String \
 # 这条消息会依次触发：
 # Base_from_TCP发布 -> trajectory_armed=true -> 相机拍照 -> PLY路径发布
 # -> 焊缝SDK自动提取 -> 相机系PoseArray -> 手眼变换 -> /abb/trajectory_tcp。
-# 不要在这一步另外调用 /camera/capture 或 /weld_seam/extract_latest。
+# 本流程只拍照一次、只提取一次；不要另外调用 /camera/capture 或 /weld_seam/extract_latest。
 
 # ------------------------------------------------------------
-# 9.9 查看并人工核对手眼结果
+# 9.8 查看文件、相机系位姿和robot_base手眼结果
 # ------------------------------------------------------------
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /camera/pointcloud_file
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /weld_seam/result_csv
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /weld_seam/result_visualization
 ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /weld_task/capture_tcp_pose_base
 ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /weld_seam/poses_camera_frame
 ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable /abb/trajectory_tcp
-# /handeye_bridge/status 不是保留话题，应以9.7中提前启动的监视终端为准。
+# 三个status都不是保留话题，应以9.6中提前启动的监视终端为准。
+
+ls -lt /home/mini/scut_weld_data/pointclouds | head
+ls -lt /home/mini/scut_weld_data/weld_results | head
 
 # 期望 /abb/trajectory_tcp.header.frame_id 为 robot_base。
 # PoseArray位置单位是m；和示教器的mm比较时乘1000。
@@ -236,7 +225,7 @@ ros2 topic echo --once --qos-durability transient_local --qos-reliability reliab
 # 由操作者在示教器上低速、单点、禁弧手动验证，ROS不发送运动命令。
 
 # ------------------------------------------------------------
-# 9.10 测试结束
+# 9.9 测试结束
 # ------------------------------------------------------------
 # 在各 ros2 run 终端按 Ctrl+C，先停止任务协调和手眼桥，再停止焊缝和相机节点。
 # 再次确认本轮没有启动ABB、焊机、weld_logic或电机节点：
