@@ -23,8 +23,8 @@ chishine_camera_node:
     # 焊缝提取只需 XYZ；false 更快且不会因 RGB 视场映射裁掉深度点。
     enable_rgb: false
     binary_ply: true
-    depth_min_mm: 460
-    depth_max_mm: 520
+    depth_min_mm: 100
+    depth_max_mm: 600
     depth_gain: 1.0
     depth_exposure: 8000.0
     depth_frame_time: 10000.0
