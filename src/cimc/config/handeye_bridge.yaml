@@ -1,0 +1,13 @@
+handeye_abb_bridge_node:
+  ros__parameters:
+    # 标定矩阵本体与方向都在本配置中统一指定。
+    matrix_file: "/home/mini/x86_ros2_ws/src/cimc/config/handeye_result20260723.yaml"
+    matrix_key: "handEyeMatrix"
+    matrix_direction: "tcp_from_camera"
+    matrix_translation_unit: "mm"
+    output_frame_id: "robot_base"
+    require_capture_pose: true
+    require_task_armed: true
+    # 当前只验证计算结果；这个测试 launch 会拒绝 true。
+    send_to_abb: false
+    protocol_precision: 6

@@ -10,7 +10,9 @@
 | `cimc/data_receiver_node.py` | TCP 接收 ABB 文本/坐标，同时异步转发 ABB 原始流和焊机 6 字节反馈到另一工控机 |
 | `cimc/weld_task_coordinator_node.py` | 协调一次拍照、自动提取和手眼变换任务 |
 | `cimc/handeye_abb_bridge_node.py` | 把相机系焊接位姿转换到拍照时 TCP 所在基坐标系 |
-| `launch/camera_weld_handeye_test.launch.py` | 启动当前安全测试链，并打印下一条基坐标轨迹 |
+| `config/handeye_bridge.yaml` | 手眼矩阵路径、方向、单位、输出坐标系和发送安全开关 |
+| `config/weld_task_coordinator.yaml` | 拍照、自动提取、捕获位姿单位和基坐标系参数 |
+| `launch/camera_weld_handeye_test.launch.py` | 启动当前安全测试链，并打印状态与下一条基坐标轨迹 |
 | `setup.py` | 安装 ROS 2 console scripts、配置和 launch |
 | `setup.cfg` | 把可执行入口安装到 `lib/cimc` |
 | `package.xml` | 声明 `rclpy/std_msgs/geometry_msgs/python3-serial` 运行依赖 |
@@ -127,4 +129,4 @@ source install/setup.bash
 ros2 launch cimc camera_weld_handeye_test.launch.py
 ```
 
-该 launch 强制 `send_to_abb=false`，不启动 `data_receiver_node`、`weld_controller_node`、`weld_logic_node` 或 `motor_control_node`。三个 YAML 默认直接读取 `/home/mini/x86_ros2_ws/src` 下的源文件。
+该 launch 不启动 `data_receiver_node`、`weld_controller_node`、`weld_logic_node` 或 `motor_control_node`。它只指定主工作区 `src` 内的四个 ROS 参数 YAML，不在 launch 里覆盖参数值。手眼配置必须显式保持 `send_to_abb: false`，否则测试 launch 会在启动节点前拒绝运行。

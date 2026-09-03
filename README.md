@@ -229,10 +229,12 @@ launch 同时启动相机、焊缝提取、手眼桥和任务协调节点，并�
 ```text
 src/chishine_camera_ros2/config/camera.yaml
 src/weld_seam_perception/config/weld_seam.yaml
+src/cimc/config/handeye_bridge.yaml
+src/cimc/config/weld_task_coordinator.yaml
 src/cimc/config/handeye_result20260723.yaml
 ```
 
-如果工作区不在默认位置，可覆盖 `workspace_root:=<path>`。逐节点命令仍保留用于独立排障。
+手眼矩阵方向只修改 `handeye_bridge.yaml` 中的 `matrix_direction`；焊缝算法参数只修改 `weld_seam.yaml` 中的 `algorithm_overrides`。launch 只指定这些参数文件，不再用 launch 字典覆盖节点参数。如果工作区不在默认位置，可覆盖 `workspace_root:=<path>`。逐节点命令仍保留用于独立排障。
 
 ### 10.1 电机节点
 

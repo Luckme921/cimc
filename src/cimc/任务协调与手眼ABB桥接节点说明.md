@@ -153,7 +153,9 @@ ros2 topic echo /handeye_bridge/status
 ros2 launch cimc camera_weld_handeye_test.launch.py
 ```
 
-该 launch 只启动 `chishine_camera_node`、`weld_seam_node`、`handeye_abb_bridge_node` 和 `weld_task_coordinator_node`，并在 launch 终端监视三个状态话题、等待打印下一条 `/abb/trajectory_tcp`。它强制 `send_to_abb=false`，不启动 ABB TCP、焊机、焊接逻辑或电机节点。
+该 launch 只启动 `chishine_camera_node`、`weld_seam_node`、`handeye_abb_bridge_node` 和 `weld_task_coordinator_node`，并在 launch 终端监视三个状态话题、等待打印下一条新的 `/abb/trajectory_tcp`。它不启动 ABB TCP、焊机、焊接逻辑或电机节点。
+
+launch 不覆盖节点参数：手眼桥参数在 `config/handeye_bridge.yaml`，协调器参数在 `config/weld_task_coordinator.yaml`，相机与焊缝节点仍分别读取各自包内的 YAML。测试 launch 会先检查 `handeye_bridge.yaml` 中的 `send_to_abb` 必须为 `false`，但不会暗中覆盖它。
 
 下列分节点命令保留作为故障隔离手段。
 

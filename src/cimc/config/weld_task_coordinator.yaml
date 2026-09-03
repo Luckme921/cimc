@@ -1,0 +1,10 @@
+weld_task_coordinator_node:
+  ros__parameters:
+    start_command: "START_CAPTURE"
+    camera_service: "/camera/capture"
+    weld_auto_process: true
+    extract_service: "/weld_seam/extract_latest"
+    service_wait_timeout_s: 3.0
+    require_capture_pose: true
+    capture_pose_unit: "mm"
+    base_frame_id: "robot_base"

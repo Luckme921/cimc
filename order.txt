@@ -247,5 +247,8 @@ ros2 topic pub --once /abb/raw_text std_msgs/msg/String \
 # 相机、焊缝和手眼配置默认直接读取主工作区 src 内的 YAML：
 # ~/x86_ros2_ws/src/chishine_camera_ros2/config/camera.yaml
 # ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
+# ~/x86_ros2_ws/src/cimc/config/handeye_bridge.yaml
+# ~/x86_ros2_ws/src/cimc/config/weld_task_coordinator.yaml
 # ~/x86_ros2_ws/src/cimc/config/handeye_result20260723.yaml
 # 只修改 YAML 参数后，重启 launch 即可生效，无需重新编译。
+# launch 不覆盖 YAML 参数；手眼方向改 handeye_bridge.yaml 的 matrix_direction。
