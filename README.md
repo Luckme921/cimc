@@ -2,9 +2,9 @@
 
 本工作区面向 Ubuntu 22.04 x86_64 + ROS 2 Humble，用于 Chishine 3D 相机采集、波纹板焊缝识别、手眼变换、ABB 通信以及后续焊机/旋弧电机联动。
 
-当前已经打通“相机软件触发 -> PLY -> 焊缝 SDK -> 相机坐标系焊接位姿”的 ROS 2 感知链，并已加入一次任务协调节点和手眼/ABB 桥接节点。下一阶段先在**不连接机械臂通信、不自动运动、不起弧**的条件下，使用示教器显示的拍照位姿模拟 `Base_from_TCP`，检查变换后的 `robot_base` 轨迹，再由操作者手动逐点验证。
+当前已经打通“相机软件触发 -> PLY -> 焊缝 SDK -> 相机坐标系焊接位姿 -> 手眼变换 -> `robot_base` 轨迹”的 ROS 2 链路。2026-09-03 现场测试已证明变换后 XYZ 与实际焊缝点基本重合；四元数姿态仍需结合 ABB 当前 tooldata 与算法工具轴定义继续验证。
 
-本版本暂不提供生产 launch：现场先按最终 launch 的顺序逐节点启动、观察和停止，避免相机、坐标系、ABB 网络或焊接执行器中的任一问题被“一键启动”掩盖。全部离线及低风险节点分别验收后，再固化 launch/systemd。
+本版本提供阶段性的 `camera_weld_handeye_test.launch.py`，只启动相机、焊缝感知、手眼桥和任务协调节点。它不是生产 launch，不启动 ABB TCP、焊机、焊接逻辑或电机节点，且强制 `send_to_abb=false`。
 
 ## 1. 最终目录和保留内容
 
@@ -59,11 +59,11 @@ flowchart LR
 
 | 模块 | 当前状态 |
 |---|---|
-| Chishine 相机独立抓图与实时查看器 | 历史硬件单测已通过；下次重新连接相机复验 |
-| ROS 相机软件触发与 PLY 发布 | 已集成并编译；等待现场相机复验 |
-| 焊缝 SDK 2.2 与 ROS 进程内调用 | 独立算法和 ROS 调用已有结果；继续用新拍 PLY 回归 |
-| 焊缝关键点与相机系姿态 | 已输出 CSV、可视化 PLY 和 PoseArray |
-| 任务协调与手眼桥接 | 框架、单位转换和矩阵校验已实现；尚未完成真实安装位姿验证 |
+| Chishine 相机独立抓图与实时查看器 | 历史硬件单测和 2026-09-03 现场连接通过 |
+| ROS 相机软件触发与 PLY 发布 | 现场软触发成功，960x600 点云已落盘并发布 |
+| 焊缝 SDK 2.2 与 ROS 进程内调用 | 现场新拍 PLY 已成功生成 6 个焊点和 2 个过渡点 |
+| 焊缝关键点与相机系姿态 | 已输出 CSV、可视化 PLY 和 PoseArray；参数仍需持续现场调整 |
+| 任务协调与手眼桥接 | 完整链路已输出 8 个基坐标位姿，XYZ 初步现场对齐，姿态待验证 |
 | ABB 自动接收/发送 | 保留接口；本轮无机械臂通信测试不启动 |
 | 焊机、旋弧电机、固定点号工艺逻辑 | 与动态焊缝轨迹尚未闭环；本轮不启动 |
 
@@ -213,6 +213,26 @@ source /opt/ros/humble/setup.bash
 source ~/x86_ros2_ws/install/setup.bash
 export LD_LIBRARY_PATH="$HOME/scut_weld_sdk_install/lib:$LD_LIBRARY_PATH"
 ```
+
+### 10.0 当前阶段一键测试 launch
+
+关闭实时查看器、释放相机后执行：
+
+```bash
+ros2 launch cimc camera_weld_handeye_test.launch.py
+```
+
+launch 同时启动相机、焊缝提取、手眼桥和任务协调节点，并在同一终端打印任务/算法/手眼状态以及下一条完整的 `/abb/trajectory_tcp`。节点就绪后，仍需另开终端人工发布一次 `START_CAPTURE`。
+
+这个 launch 直接读取主工作区中的以下文件，修改 YAML 参数后下次启动立即生效：
+
+```text
+src/chishine_camera_ros2/config/camera.yaml
+src/weld_seam_perception/config/weld_seam.yaml
+src/cimc/config/handeye_result20260723.yaml
+```
+
+如果工作区不在默认位置，可覆盖 `workspace_root:=<path>`。逐节点命令仍保留用于独立排障。
 
 ### 10.1 电机节点
 

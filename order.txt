@@ -162,7 +162,7 @@ export HAND_EYE_DIRECTION=tcp_from_camera
 
 ros2 run cimc handeye_abb_bridge_node --ros-args \
   -p matrix_file:="$HOME/x86_ros2_ws/src/cimc/config/handeye_result20260723.yaml" \
-  -p matrix_direction:="$HAND_EYE_DIRECTION" \
+  -p matrix_direction:=tcp_from_camera \
   -p matrix_translation_unit:=mm \
   -p output_frame_id:=robot_base \
   -p require_capture_pose:=true \
@@ -230,3 +230,22 @@ ls -lt /home/mini/scut_weld_data/weld_results | head
 # 在各 ros2 run 终端按 Ctrl+C，先停止任务协调和手眼桥，再停止焊缝和相机节点。
 # 再次确认本轮没有启动ABB、焊机、weld_logic或电机节点：
 ros2 node list
+
+# ============================================================
+# 10. 当前里程碑：一键启动相机 + 焊缝 + 手眼验证链
+# ============================================================
+# 先关闭 chishine_live_viewer，确认它已释放相机。
+# launch 不启动 data_receiver、weld_controller、weld_logic 或 motor_control。
+# send_to_abb 在 launch 中强制为 false。
+# launch 终端会显示三个状态话题，并打印下一条 /abb/trajectory_tcp。
+ros2 launch cimc camera_weld_handeye_test.launch.py
+
+# 所有节点 ready 后，另开终端，填入拍照瞬间示教器的实际位姿：
+ros2 topic pub --once /abb/raw_text std_msgs/msg/String \
+  "{data: 'START_CAPTURE:<X_mm>,<Y_mm>,<Z_mm>,<QW>,<QX>,<QY>,<QZ>'}"
+
+# 相机、焊缝和手眼配置默认直接读取主工作区 src 内的 YAML：
+# ~/x86_ros2_ws/src/chishine_camera_ros2/config/camera.yaml
+# ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
+# ~/x86_ros2_ws/src/cimc/config/handeye_result20260723.yaml
+# 只修改 YAML 参数后，重启 launch 即可生效，无需重新编译。

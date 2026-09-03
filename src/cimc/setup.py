@@ -13,6 +13,7 @@ setup(
             'package.xml', 'README.md',
             '任务协调与手眼ABB桥接节点说明.md']),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

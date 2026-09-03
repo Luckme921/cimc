@@ -1,6 +1,6 @@
 # cimc 包说明：ABB 数据与旋转焊枪电机
 
-这是 `ament_python` 包，只保留用户最新版本的 `data_receiver_node.py`、`motor_control_node.py` 和 Python 包初始化文件。旧 DOE 测试节点、launch、测试模板和缓存已经移除。
+这是 `ament_python` 包，包含 ABB 数据、任务协调、手眼变换和旋转焊枪电机节点。旧 DOE 测试节点、测试模板和缓存已经移除。
 
 ## 文件作用
 
@@ -8,7 +8,10 @@
 |---|---|
 | `cimc/motor_control_node.py` | 订阅转速，使用串口协议控制偏心旋转焊枪电机；支持拔插检测和定时重连 |
 | `cimc/data_receiver_node.py` | TCP 接收 ABB 文本/坐标，同时异步转发 ABB 原始流和焊机 6 字节反馈到另一工控机 |
-| `setup.py` | 安装两个 ROS 2 console script，不再注册 DOE 节点 |
+| `cimc/weld_task_coordinator_node.py` | 协调一次拍照、自动提取和手眼变换任务 |
+| `cimc/handeye_abb_bridge_node.py` | 把相机系焊接位姿转换到拍照时 TCP 所在基坐标系 |
+| `launch/camera_weld_handeye_test.launch.py` | 启动当前安全测试链，并打印下一条基坐标轨迹 |
+| `setup.py` | 安装 ROS 2 console scripts、配置和 launch |
 | `setup.cfg` | 把可执行入口安装到 `lib/cimc` |
 | `package.xml` | 声明 `rclpy/std_msgs/geometry_msgs/python3-serial` 运行依赖 |
 
@@ -118,4 +121,10 @@ colcon build --symlink-install --packages-select cimc
 source install/setup.bash
 ```
 
-本包没有 launch；两个节点必须分别启动和验收。
+当前阶段的相机+焊缝+手眼测试可使用：
+
+```bash
+ros2 launch cimc camera_weld_handeye_test.launch.py
+```
+
+该 launch 强制 `send_to_abb=false`，不启动 `data_receiver_node`、`weld_controller_node`、`weld_logic_node` 或 `motor_control_node`。三个 YAML 默认直接读取 `/home/mini/x86_ros2_ws/src` 下的源文件。

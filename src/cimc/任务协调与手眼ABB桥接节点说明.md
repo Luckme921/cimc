@@ -147,6 +147,16 @@ ros2 topic echo /handeye_bridge/status
 
 ## 8. 实际链路启动
 
+当前相机、焊缝提取和手眼位置初步验证阶段，优先使用：
+
+```bash
+ros2 launch cimc camera_weld_handeye_test.launch.py
+```
+
+该 launch 只启动 `chishine_camera_node`、`weld_seam_node`、`handeye_abb_bridge_node` 和 `weld_task_coordinator_node`，并在 launch 终端监视三个状态话题、等待打印下一条 `/abb/trajectory_tcp`。它强制 `send_to_abb=false`，不启动 ABB TCP、焊机、焊接逻辑或电机节点。
+
+下列分节点命令保留作为故障隔离手段。
+
 分别启动：
 
 ```bash

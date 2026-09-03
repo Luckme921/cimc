@@ -14,6 +14,11 @@
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-serial</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ros2topic</exec_depend>
+  <exec_depend>chishine_camera_ros2</exec_depend>
+  <exec_depend>weld_seam_perception</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>
