@@ -252,3 +252,7 @@ ros2 topic pub --once /abb/raw_text std_msgs/msg/String \
 # ~/x86_ros2_ws/src/cimc/config/handeye_result20260723.yaml
 # 只修改 YAML 参数后，重启 launch 即可生效，无需重新编译。
 # launch 不覆盖 YAML 参数；手眼方向改 handeye_bridge.yaml 的 matrix_direction。
+# 焊缝 Tool X 默认参考工件 +X：weld_seam.yaml 中 tool_x_reference=workpiece_x。
+# 若重建后的 ABB TCP +X 与焊接前进方向相反，只把
+# tool_x_points_along_positive_workpiece_x=true 改为 false，然后重启 launch。
+# corner_bisector 仅用于回退旧姿态行为；修改外部 SDK 源码后仍必须重新构建、安装 SDK。

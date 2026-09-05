@@ -51,8 +51,12 @@ CSV 和 PoseArray 发布者为 Transient Local，后启动的调试订阅者能�
 algorithm_overrides:
   - "roi.enable=false"
   - "normal.mode=auto"
-  - "orientation.tool_positive_z_points_from_tcp_to_body=true"
+  - "orientation.tool_positive_z_points_from_tcp_to_body=false"
+  - "orientation.tool_x_reference=workpiece_x"
+  - "orientation.tool_x_points_along_positive_workpiece_x=true"
 ```
+
+`tool_x_reference=workpiece_x` 时，算法保持 Tool Z 不变，并将工件焊接前进轴投影到 Tool Z 的法平面作为 Tool X，以减少局部角点造成的绕枪轴滚转。现场 TCP +X 与焊接前进方向相反时，只需把 `tool_x_points_along_positive_workpiece_x` 改为 `false`；需要复现 SDK 2.2.0 行为时可将参考模式改为 `corner_bisector`。
 
 ROI、四类位置偏置、四类姿态等均可继续添加，不用重新编译节点。例如：
 
