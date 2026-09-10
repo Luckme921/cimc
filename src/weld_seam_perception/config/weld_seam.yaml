@@ -17,4 +17,4 @@ weld_seam_node:
       # Tool +X 参考固定工件焊接前进轴，减少不同角点间绕焊枪轴滚转。
       # 若现场 TCP +X 与焊接前进方向相反，只把下一项 true 改为 false。
       - "orientation.tool_x_reference=workpiece_x"
-      - "orientation.tool_x_points_along_positive_workpiece_x=true"
+      - "orientation.tool_x_points_along_positive_workpiece_x=false"
