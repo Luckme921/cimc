@@ -2,18 +2,17 @@
 
 ## 1. 当前节点总览
 
-本文以当前 x86_ros2_ws/src 源码为准。系统现有 9 个业务节点：
+本文以当前 x86_ros2_ws/src 源码为准。系统现有 8 个业务节点：
 
 | 包 | 节点 | 当前职责 |
 |---|---|---|
-| cimc | data_receiver_node | ABB TCP收发、坐标解析、第三方数据转发 |
+| cimc | data_receiver_node | ABB TCP收发、第三方JSONL双向协议和底层话题映射 |
 | cimc | motor_control_node | 串口控制偏心旋转焊枪电机 |
 | cimc | weld_task_coordinator_node | 接收拍照命令、调用相机、管理一次感知任务 |
 | cimc | handeye_abb_bridge_node | 手眼变换、生成ABB基坐标轨迹和发送文本 |
 | chishine_camera_ros2 | chishine_camera_node | 发现/连接相机、软件触发、保存PLY |
 | weld_seam_perception | weld_seam_node | 调用焊缝SDK并发布CSV、PLY和PoseArray |
 | weld_controller | weld_controller_node | USB-CAN控制焊机、解析焊机反馈 |
-| weld_controller | weld_remote_interface_node | 执行第三方高级焊接指令，当前默认dry-run |
 | weld_controller | weld_logic_node | 历史固定点号工艺逻辑，当前不运行 |
 
 整体链路：
@@ -28,8 +27,9 @@ ABB
  -> data_receiver_node
  -> ABB
 
-192.168.3.5（正式入站协议待定）或ROS模拟话题
- -> weld_remote_interface_node
+192.168.3.5（JSONL v1）
+ <-> data_receiver_node
+ -> /weld/control + /weld/set_param_real + /cimc/motor_speed
  -> weld_controller_node / motor_control_node
  -> 焊机 / 旋转电机
 
@@ -50,7 +50,9 @@ weld_controller_node
 - 接收 ABB 原始 ASCII 文本并发布到 ROS 2。
 - 解析 P...:x,y,z,... 格式，发布前三个坐标。
 - 接收 /abb/tx_text，通过同一条 ABB TCP 连接发送回机器人。
-- 把 ABB 原始字节和焊机 RX 六字节反馈异步转发到第三方工控机。
+- 把 ABB 数据和焊机 RX 六字节反馈封装成 JSONL v1 发给第三方。
+- 从同一 TCP 连接接收第三方动作/实时设定值，校验后直接发布现有焊机和电机话题。
+- 处理 JSONL 半包/粘包、递增序号、ACK、数值软限制和起焊后断线停机。
 
 ### 2.2 参数
 
@@ -63,6 +65,12 @@ weld_controller_node
 | forward_port | 50000 | 第三方TCP端口 |
 | forward_queue_size | 500 | 第三方转发队列容量 |
 | weld_feedback_topic | /weld/feedback_raw | 焊机逐帧原始反馈话题 |
+| third_party_command_enabled | true | 是否允许第三方请求发布到底层话题 |
+| third_party_max_line_bytes | 4096 | 单条JSONL最大字节数 |
+| unary_voltage_placeholder_v | 20.0 | 一元模式底层数组占位电压 |
+| min_current_a/max_current_a | 1.0/350.0 | 第三方电流软限制 |
+| min_rotation_speed_rps/max_rotation_speed_rps | 0.0/6.0 | 第三方转速软限制；当前上限取历史工艺值 |
+| stop_on_third_party_disconnect | true | 起焊后第三方断线则停焊停电机 |
 
 ### 2.3 话题
 
@@ -72,7 +80,11 @@ weld_controller_node
 | 发布 | /abb/weld_point | geometry_msgs/msg/Point | 从 P... 文本提取的XYZ |
 | 订阅 | /abb/tx_text | std_msgs/msg/String | 等待发给ABB的ASCII文本 |
 | 发布 | /abb/tx_status | std_msgs/msg/String | OK或ERROR发送状态 |
-| 订阅 | /weld/feedback_raw | std_msgs/msg/UInt8MultiArray | 将焊机RX六字节帧原样转发到第三方 |
+| 订阅 | /weld/feedback_raw | std_msgs/msg/UInt8MultiArray | 将焊机RX六字节封装为反馈JSONL |
+| 发布 | /weld/control | std_msgs/msg/String | 第三方动作映射后的焊机命令 |
+| 发布 | /weld/set_param_real | std_msgs/msg/Float32MultiArray | 第三方电流和一元模式占位电压 |
+| 发布 | /cimc/motor_speed | std_msgs/msg/Float32 | 第三方旋转速度 |
+| 发布 | /third_party/status | std_msgs/msg/String | 协议请求接受/拒绝状态 |
 
 ### 2.4 使用示例
 
@@ -84,9 +96,7 @@ ros2 run cimc data_receiver_node
 
 ~~~bash
 ros2 run cimc data_receiver_node --ros-args \
-  -p listen_host:=192.168.125.2 \
-  -p abb_allowed_ip:=192.168.125.1 \
-  -p forward_ip:=192.168.3.5
+  --params-file ~/x86_ros2_ws/src/cimc/config/data_receiver.yaml
 ~~~
 
 模拟待发文本：
@@ -100,9 +110,9 @@ ros2 topic pub --once /abb/tx_text std_msgs/msg/String \
 
 - OK 只表示 socket.sendall() 成功，不代表 ABB 已解析或执行。
 - ABB 未连接时，当前待发消息会丢弃，避免重连后误发旧轨迹。
-- TCP 可能拆包和粘包；当前没有完整的跨 recv() 半包缓存。
-- 第三方通道混合转发 ABB 原始数据和焊机反馈，需要双方约定协议。
-- 192.168.3.5 的入站命令格式尚未确定，当前不从 TCP 连接解析焊接命令。
+- 第三方 ACK 只表示 ROS 话题已发布，不代表焊机或电机物理执行成功。
+- ABB 入站文本的业务解析仍按现有接收块处理；第三方 JSONL 通道已独立处理半包和粘包。
+- 完整双向报文定义见 `第三方焊接通信协议.md`。
 
 ---
 
@@ -482,53 +492,29 @@ ros2 topic pub --once /weld/set_param_real std_msgs/msg/Float32MultiArray \
 
 ---
 
-## 9. weld_remote_interface_node
+## 9. 192.168.3.5 直接协议映射（data_receiver_node）
 
 ### 9.1 当前功能
 
-- 作为 192.168.3.5 外部工艺决策与现有焊机/旋转电机话题之间的执行边界。
-- 不按 ABB 点号选择工艺，不包含固定工艺表。
-- 默认一元模式：实时设定数据为 `[电流A, 旋转速度r/s]`，电压占位值不参与内置曲线计算。
-- 启动时不自动发任何控制命令。
-- 默认 `output_enabled=false`，可在无硬件动作时完整模拟指令顺序。
-- 默认要求先 `GAS_ON`，再接受 `WELD_START`。
+- 192.168.3.5 负责工艺决策，x86 不按 ABB 点号选择电流或转速。
+- 双方固定使用 JSONL v1，每帧以换行结束。
+- `data_receiver_node` 直接把合法请求发布到现有焊机/电机底层话题，没有中间 remote 节点。
+- 默认一元模式：第三方实时给 `[电流A, 旋转速度r/s]`，底层占位电压不参与内置曲线计算。
+- 节点启动和 TCP 建连都不会自动送气或起焊；只有收到合法请求才发布控制消息。
 
 ### 9.2 接口
 
-| 方向 | 名称 | 类型 | 作用 |
-|---|---|---|---|
-| 订阅 | /weld/remote/command | String | GAS_ON、WELD_START、WELD_STOP等高级命令 |
-| 订阅 | /weld/remote/setpoints | Float32MultiArray | [电流A, 旋转速度r/s] |
-| 发布 | /weld/remote/status | String | 接受/拒绝、是否转发、dry-run和状态 |
-| 发布 | /weld/control | String | 映射后的底层焊机动作 |
-| 发布 | /weld/set_param_real | Float32MultiArray | [电流A, 一元模式电压占位V] |
-| 发布 | /cimc/motor_speed | Float32 | 旋转速度r/s |
+| JSONL请求 | 直接发布的ROS消息 | 作用 |
+|---|---|---|
+| `command:GAS_ON` | `/weld/control` 三条消息 | 一元模式、启动CAN、送气 |
+| `command:WELD_START` | `/weld/control:start_welding` | 起焊 |
+| `command:WELD_STOP` | `/weld/control:stop_welding`和电机0 | 停焊停转 |
+| `command:FAULT_RESET` | `/weld/control:fault_reset` | 故障复位 |
+| `setpoints` | `/weld/set_param_real`和`/cimc/motor_speed` | 实时电流与转速 |
 
-### 9.3 高级命令
+### 9.3 协议
 
-| 命令 | 作用 |
-|---|---|
-| GAS_ON / START_GAS | 请求一元内置曲线、启动CAN轮询并送气 |
-| WELD_START / START_WELDING | 开始焊接；默认必须先送气 |
-| WELD_STOP / STOP_WELDING / STOP_ALL | 停焊并停止旋转电机 |
-| FAULT_RESET | 焊机故障复位 |
-
-### 9.4 当前安全模拟
-
-~~~bash
-ros2 run weld_controller weld_remote_interface_node --ros-args \
-  --params-file ~/x86_ros2_ws/src/weld_controller/config/weld_remote_interface.yaml
-ros2 topic echo /weld/remote/status
-ros2 topic pub --once /weld/remote/command std_msgs/msg/String "{data: 'GAS_ON'}"
-ros2 topic pub --once /weld/remote/setpoints std_msgs/msg/Float32MultiArray \
-  "{data: [250.0, 6.0]}"
-ros2 topic pub --once /weld/remote/command std_msgs/msg/String "{data: 'WELD_START'}"
-ros2 topic pub --once /weld/remote/command std_msgs/msg/String "{data: 'WELD_STOP'}"
-~~~
-
-保持配置中的 `output_enabled=false` 时以上命令只模拟，不会发往焊机或电机。正式网络字符协议确定后，网络层应发布同一组输入话题。
-
-`/weld/remote/status` 中的 `forwarded=true` 仅表示消息已发布到 ROS 底层话题，不是 CAN、串口或物理执行成功应答。
+请求、ACK、ABB数据、焊机反馈、字段和断线行为统一见仓库根目录的 `第三方焊接通信协议.md`。当前无第三方设备时，用 `order.txt` 第12节直接发布“解析完成后”的底层话题；监听时不能同时启动真实执行节点。
 
 ---
 
@@ -607,7 +593,7 @@ ros2 topic pub --once /cimc/override_param std_msgs/msg/Float32MultiArray \
 - weld_seam_node
 - handeye_abb_bridge_node（保持 send_to_abb=false）
 - weld_controller_node（先不实际起弧）
-- weld_remote_interface_node（保持 output_enabled=false）
+- data_receiver_node（第三方协议联调时先不启动真实焊机/电机）
 
 真实自动焊接前还需要完成：
 
@@ -615,7 +601,7 @@ ros2 topic pub --once /cimc/override_param std_msgs/msg/Float32MultiArray \
 2. 确认ABB发送的是拍照瞬间 Base_from_TCP。
 3. 确认ABB和ROS四元数顺序、坐标系和工具方向。
 4. 为ABB轨迹增加接收应答。
-5. 确定192.168.3.5的入站命令与出站混合数据分帧协议，并映射到remote话题。
+5. 按 JSONL v1 与 192.168.3.5 联调请求、ACK、ABB数据和焊机反馈。
 6. 增加工作空间、碰撞、干涉和姿态跳变安全检查。
 
 ---

@@ -7,11 +7,12 @@
 | 文件 | 作用 |
 |---|---|
 | `cimc/motor_control_node.py` | 订阅转速，使用串口协议控制偏心旋转焊枪电机；支持拔插检测和定时重连 |
-| `cimc/data_receiver_node.py` | TCP 接收 ABB 文本/坐标，同时异步转发 ABB 原始流和焊机逐帧 6 字节反馈到 192.168.3.5 |
+| `cimc/data_receiver_node.py` | TCP 接收 ABB，同时与 192.168.3.5 按 JSONL v1 双向通信并直接映射焊机/电机话题 |
 | `cimc/weld_task_coordinator_node.py` | 协调一次拍照、自动提取和手眼变换任务 |
 | `cimc/handeye_abb_bridge_node.py` | 把相机系焊接位姿转换到拍照时 TCP 所在基坐标系 |
 | `config/handeye_bridge.yaml` | 手眼矩阵路径、方向、单位、输出坐标系和发送安全开关 |
 | `config/weld_task_coordinator.yaml` | 拍照、自动提取、捕获位姿单位和基坐标系参数 |
+| `config/data_receiver.yaml` | ABB/第三方网络、协议输入限制、一元模式占位值和话题参数 |
 | `launch/camera_weld_handeye_test.launch.py` | 启动当前安全测试链，并打印状态与下一条基坐标轨迹 |
 | `setup.py` | 安装 ROS 2 console scripts、配置和 launch |
 | `setup.cfg` | 把可执行入口安装到 `lib/cimc` |
@@ -71,15 +72,19 @@ sudo usermod -aG dialout "$USER"
 
 ```text
 ABB 192.168.125.1 -> 本机 192.168.125.2:45000 -> ROS 话题
-                                           \-> 异步队列 -> 192.168.3.5:50000
-/weld/feedback_raw 的逐帧 6 字节 TPDO1 反馈 --------/
+                                           \-> JSONL abb_rx ----\
+/weld/feedback_raw -> JSONL weld_feedback -----------------------> 192.168.3.5:50000
+/weld/control、/weld/set_param_real、/cimc/motor_speed <--- JSONL command/setpoints
 ```
 
 接口：
 
 - 发布 `/abb/raw_text`，`std_msgs/msg/String`：ABB 原始 ASCII 文本；
 - 发布 `/abb/weld_point`，`geometry_msgs/msg/Point`：解析 `P...:x,y,z,...` 的前三个坐标；
-- 订阅 `/weld/feedback_raw`，`std_msgs/msg/UInt8MultiArray`：接收焊机驱动逐帧发布的 6 字节 TPDO1，并原样加入 TCP 转发队列。
+- 订阅 `/weld/feedback_raw`，`std_msgs/msg/UInt8MultiArray`：把每个 6 字节 TPDO1 解析并封装为 `weld_feedback` JSONL 帧；
+- 发布 `/weld/control` 和 `/weld/set_param_real`：把第三方动作/电流请求直接交给现有焊机驱动；
+- 发布 `/cimc/motor_speed`：把第三方旋转速度直接交给现有电机节点；
+- 发布 `/third_party/status`：记录第三方请求在协议层是否接受。
 
 可调 ROS 参数：
 
@@ -92,19 +97,23 @@ ABB 192.168.125.1 -> 本机 192.168.125.2:45000 -> ROS 话题
 | `forward_port` | `50000` | 第三方 TCP 服务端口 |
 | `forward_queue_size` | `500` | 非阻塞转发队列容量 |
 | `weld_feedback_topic` | `/weld/feedback_raw` | 焊机原始反馈帧话题 |
+| `third_party_command_enabled` | `true` | 是否把合法第三方请求发布到底层控制话题 |
+| `third_party_max_line_bytes` | `4096` | 单条 JSONL 最大字节数 |
+| `unary_voltage_placeholder_v` | `20.0` | 一元模式下底层数组第二项占位值 |
+| `min_current_a/max_current_a` | `1.0/350.0` | 网络电流软限制 |
+| `min_rotation_speed_rps/max_rotation_speed_rps` | `0.0/6.0` | 网络转速软限制；当前上限取历史工艺值 |
+| `stop_on_third_party_disconnect` | `true` | 起焊后第三方断线时停焊并停电机 |
 
-接收线程不等待第三方转发成功；转发断线时后台线程重连，所以第三方工控机故障不会阻塞 ABB 接收。队列满时当前代码按实时优先策略丢弃新数据，不让控制路径无限积压。
+ABB 接收线程不等待第三方发送成功；第三方断线时后台线程重连，所以不会阻塞 ABB 接收。重连时会丢弃断线期间的旧实时帧，避免第三方把历史反馈误认为当前状态。队列满时丢弃新反馈，不让内存无限增长。
 
 运行和改 IP：
 
 ```bash
 ros2 run cimc data_receiver_node --ros-args \
-  -p listen_host:=192.168.125.2 \
-  -p abb_allowed_ip:=192.168.125.1 \
-  -p forward_ip:=192.168.3.5
+  --params-file ~/x86_ros2_ws/src/cimc/config/data_receiver.yaml
 ```
 
-当前只完成“本机主动连接 192.168.3.5 并发送 ABB 原始流/焊机反馈”的出口。192.168.3.5 发回本机的正式命令字符、粘包拆包和帧边界协议尚未确定，因此尚不从该 TCP 连接解释焊接命令；现阶段使用 `weld_remote_interface_node` 的 `/weld/remote/*` 话题模拟。TCP 本身不保留消息边界，正式协议必须进一步明确 ABB 文本与焊机 6 字节帧的分帧规则，或为二者分配不同端口。
+固定协议见仓库根目录的 [第三方焊接通信协议.md](../../第三方焊接通信协议.md)。`data_receiver_node` 已处理 TCP 半包/粘包、版本、递增序号、字段类型、数值范围、ACK 和起焊后断线停机。ACK 只表示 ROS 话题已经发布，不表示真实设备执行成功。
 
 部署前检查：
 

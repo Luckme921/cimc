@@ -1,0 +1,34 @@
+data_receiver_node:
+  ros__parameters:
+    # ABB 机器人作为 TCP 客户端连接本机。
+    listen_host: "192.168.125.2"
+    listen_port: 45000
+    abb_allowed_ip: "192.168.125.1"
+
+    # 本机作为 TCP 客户端，主动连接 192.168.3.5 的服务端。
+    # 双向数据统一使用《第三方焊接通信协议.md》的 JSONL v1。
+    forward_ip: "192.168.3.5"
+    forward_port: 50000
+    forward_queue_size: 500
+    third_party_command_enabled: true
+    third_party_max_line_bytes: 4096
+
+    # 一元模式只调电流；底层 Float32MultiArray 的第二项必须存在，
+    # 但 use_builtin_curve 下此占位电压不参与 CAN 压强计算。
+    unary_voltage_placeholder_v: 20.0
+
+    # 网络输入软限制。当前旋转上限取历史已使用的 6 r/s；
+    # 只有核对最终电机规格后才允许提高。
+    min_current_a: 1.0
+    max_current_a: 350.0
+    min_rotation_speed_rps: 0.0
+    max_rotation_speed_rps: 6.0
+
+    # 已接受 WELD_START 后若第三方 TCP 断开，发布停焊和电机 0 r/s。
+    stop_on_third_party_disconnect: true
+
+    weld_feedback_topic: "/weld/feedback_raw"
+    weld_control_topic: "/weld/control"
+    weld_parameter_topic: "/weld/set_param_real"
+    motor_speed_topic: "/cimc/motor_speed"
+    third_party_status_topic: "/third_party/status"

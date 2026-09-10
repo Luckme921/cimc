@@ -4,7 +4,7 @@
 
 当前已经打通“相机软件触发 -> PLY -> 焊缝 SDK -> 相机坐标系焊接位姿 -> 手眼变换 -> `robot_base` 轨迹”的 ROS 2 链路。2026-09-03 现场测试已证明变换后 XYZ 与实际焊缝点基本重合。2026-09-05 已将算法 Tool X 从随局部角平分线变化改为可配置的工件 `+X/-X` 参考，并完成多组现场 PLY 离线回归；仍需在重新定义 ABB tooldata 和重新手眼标定后进行真实机器人姿态/可达性验证。
 
-2026-09-10 开始把焊接工艺决策移交给 `192.168.3.5`：x86 不再根据 ABB 点号自行选择工艺，只负责校验并执行送气、起焊、实时电流/旋转速度和停焊指令。正式网络入站协议尚未确定，当前新增 dry-run ROS 话题接口；焊机真实 TPDO1 反馈已改为逐帧 6 字节转发到 `192.168.3.5:50000`。
+2026-09-10 开始把焊接工艺决策移交给 `192.168.3.5`：x86 不再根据 ABB 点号自行选择工艺，只负责校验并执行送气、起焊、实时电流/旋转速度和停焊指令。双方固定使用逐行 JSON v1 协议；`data_receiver_node` 把第三方请求直接映射到现有焊机/电机话题，并把 ABB 数据和每个焊机 TPDO1 真实反馈按带边界的 JSON 帧发回 `192.168.3.5:50000`。完整协议见 [第三方焊接通信协议.md](./第三方焊接通信协议.md)。
 
 本版本提供阶段性的 `camera_weld_handeye_test.launch.py`，只启动相机、焊缝感知、手眼桥和任务协调节点。它不是生产 launch，不启动 ABB TCP、焊机、焊接逻辑或电机节点，且强制 `send_to_abb=false`。
 
@@ -16,17 +16,18 @@ x86_ros2_ws/
 ├── order.txt
 ├── ROS2全部节点与接口说明.md
 ├── 实际启动与分节点测试手册.md
+├── 第三方焊接通信协议.md       # 与192.168.3.5约定的JSONL v1
 ├── x86_chishine_camera_test/   # 相机SDK与独立抓图参考，COLCON_IGNORE
 ├── x86_chishine_live_viewer/   # 实时点云选位工具，COLCON_IGNORE
 ├── scut_weld_sdk_install/      # 可随Git保存的焊缝SDK安装副本
 └── src/
     ├── cimc/                    # Python：ABB 数据 + 旋转焊枪电机
-    ├── weld_controller/         # C++：USB-CAN 焊机 + 第三方远程执行接口
+    ├── weld_controller/         # C++：USB-CAN 焊机 + 历史工艺逻辑
     ├── chishine_camera_ros2/    # C++：相机发现、软件触发、PLY 发布
     └── weld_seam_perception/    # C++：进程内调用 weld_seam_sdk
 ```
 
-仓库根目录的三个参考/SDK目录通过 `COLCON_IGNORE` 与 ROS package 隔离。当前机器仍优先使用 `~/x86_chishine_camera_test/vendor_sdk` 和 `~/scut_weld_sdk_install`；换机时需要按本文设置 SDK 路径。`weld_logic_node` 仍编译和安装用于历史回退，但已由无固定工艺表的 `weld_remote_interface_node` 替代，二者不得同时运行。
+仓库根目录的三个参考/SDK目录通过 `COLCON_IGNORE` 与 ROS package 隔离。当前机器仍优先使用 `~/x86_chishine_camera_test/vendor_sdk` 和 `~/scut_weld_sdk_install`；换机时需要按本文设置 SDK 路径。`weld_logic_node` 仍编译和安装用于历史回退，但当前架构不运行它；第三方命令由 `data_receiver_node` 直接映射到底层话题。
 
 每个包目录均有自己的中文 `README.md`，说明内部源码、参数和接口。
 
@@ -51,11 +52,11 @@ flowchart LR
     D -->|"/abb/weld_point"| MON["监视/记录"]
     W["weld_controller_node\nUSB-CAN"] -->|"/weld/status"| WMON["焊机诊断监视"]
     W -->|"/weld/feedback_raw\n逐帧6字节"| D
-    D -->|"ABB原始流 + 焊机反馈"| EXT["192.168.3.5\n外部焊接决策"]
-    EXT -. "入站协议待定" .-> RI["weld_remote_interface_node"]
-    RSIM["ROS话题模拟\n/weld/remote/*"] --> RI
-    RI -->|"/weld/control\n/weld/set_param_real"| W
-    RI -->|"/cimc/motor_speed"| M["motor_control_node\n偏心焊枪电机"]
+    D <-->|"JSONL v1\n命令/ACK/ABB/焊机反馈"| EXT["192.168.3.5\n外部焊接决策"]
+    D -->|"/weld/control\n/weld/set_param_real"| W
+    D -->|"/cimc/motor_speed"| M["motor_control_node\n偏心焊枪电机"]
+    TSIM["当前人工测试\n直接发布底层话题"] --> W
+    TSIM --> M
 ```
 
 相机节点与算法节点通过“文件绝对路径”解耦。相机服务返回成功且 PLY 完整写盘后才发布路径，算法节点收到路径后同步提取，避免读取半写文件。
@@ -70,7 +71,7 @@ flowchart LR
 | 焊缝关键点与相机系姿态 | Tool X 可选工件 `+X/-X` 或旧角平分线；5 组 PLY 离线回归保持 XYZ/分类/Tool Z 不变，真实姿态待验证 |
 | 任务协调与手眼桥接 | 完整链路已输出 8 个基坐标位姿，XYZ 初步现场对齐；需重建 TCP、重做手眼后再验证姿态与可达性 |
 | ABB 自动接收/发送 | 保留接口；本轮无机械臂通信测试不启动 |
-| 焊机与旋弧电机远程执行 | 新接口默认 dry-run；一元模式和模拟命令已实现，真实执行及 192.168.3.5 入站协议待联调 |
+| 焊机与旋弧电机远程执行 | JSONL v1 和直接话题映射已实现；一元模式为默认，真实焊机/电机及 192.168.3.5 待联调 |
 | 旧固定点号工艺逻辑 | 不再作为当前架构的大脑；保留源码回退，不启动 |
 
 下一次现场主流程只执行一次完整任务：全部计算节点先就绪，再模拟 `START_CAPTURE`，由协调节点触发唯一一次拍照、焊缝提取和手眼变换。直接调用 `/camera/capture` 只保留作相机/算法独立排障，不插入主流程。
@@ -275,15 +276,15 @@ ros2 topic echo /weld/status
 ros2 topic echo /weld/feedback_raw
 ```
 
-`weld_logic_node` 不再运行。新的 `weld_remote_interface_node` 默认 dry-run，且没有加入当前相机/手眼 launch：
+`weld_logic_node` 不再运行，也没有新增中间“焊接大脑”节点。`data_receiver_node` 收到 192.168.3.5 的 JSONL v1 请求后，直接发布 `/weld/control`、`/weld/set_param_real` 和 `/cimc/motor_speed`。网络配置位于：
 
 ```bash
-ros2 run weld_controller weld_remote_interface_node --ros-args \
-  --params-file ~/x86_ros2_ws/src/weld_controller/config/weld_remote_interface.yaml
-ros2 topic echo /weld/remote/status
+ros2 run cimc data_receiver_node --ros-args \
+  --params-file ~/x86_ros2_ws/src/cimc/config/data_receiver.yaml
+ros2 topic echo /third_party/status
 ```
 
-模拟指令和参数命令见 `order.txt` 及 `src/weld_controller/README.md`。只有完成独立安全验收后才允许把 `output_enabled` 改为 `true`。
+当前没有 192.168.3.5 时，不模拟网络层，而是按 `order.txt` 第 12 节直接发布协议解析后应产生的三个底层话题。启动底层节点或发布这些话题可能操作真实焊机和电机，必须先完成独立安全验收。
 
 ### 10.4 相机节点
 
@@ -427,7 +428,7 @@ ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
 ## 14. 开机运行前的安全边界
 
 1. 相机和算法节点只采集/计算/发布文件与位姿，不应直接驱动 ABB。
-2. `weld_logic_node` 已停用；`weld_remote_interface_node` 当前只能保持 `output_enabled=false` 做模拟。
+2. `weld_logic_node` 已停用；第三方协议直接映射现有焊机和电机话题，不再运行中间远程接口节点。
 3. 在机械臂自动运行前，先离线确认粉红十字中心、四元数、手眼矩阵、枪尖 TCP、工件坐标以及凹角干涉余量。
 4. 本轮无 ABB/焊接执行验证不启动 `data_receiver_node`、`weld_controller_node`、`weld_logic_node` 或 `motor_control_node`。
 5. 手眼桥始终保持 `send_to_abb=false`；不能为了获得易读文本临时打开真实发送。

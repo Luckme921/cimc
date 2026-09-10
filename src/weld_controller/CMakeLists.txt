@@ -38,23 +38,14 @@ add_executable(weld_logic_node src/weld_logic_node.cpp)
 target_compile_features(weld_logic_node PRIVATE cxx_std_17)
 ament_target_dependencies(weld_logic_node rclcpp std_msgs)
 
-# 192.168.3.5 的正式网络报文尚未定稿。该节点先提供稳定的
-# ROS 高级指令边界，以后网络解析层只需映射到它的输入话题。
-add_executable(weld_remote_interface_node src/weld_remote_interface_node.cpp)
-target_compile_features(weld_remote_interface_node PRIVATE cxx_std_17)
-ament_target_dependencies(weld_remote_interface_node rclcpp std_msgs)
-
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(weld_controller_node PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(weld_logic_node PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_options(weld_remote_interface_node PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 install(TARGETS
   weld_controller_node
   weld_logic_node
-  weld_remote_interface_node
   DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 ament_package()
