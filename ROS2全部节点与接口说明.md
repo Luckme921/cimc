@@ -2,7 +2,7 @@
 
 ## 1. 当前节点总览
 
-本文以当前 x86_ros2_ws/src 源码为准。系统现有 8 个业务节点：
+本文以当前 x86_ros2_ws/src 源码为准。系统现有 9 个业务节点：
 
 | 包 | 节点 | 当前职责 |
 |---|---|---|
@@ -13,7 +13,8 @@
 | chishine_camera_ros2 | chishine_camera_node | 发现/连接相机、软件触发、保存PLY |
 | weld_seam_perception | weld_seam_node | 调用焊缝SDK并发布CSV、PLY和PoseArray |
 | weld_controller | weld_controller_node | USB-CAN控制焊机、解析焊机反馈 |
-| weld_controller | weld_logic_node | 根据ABB点序号切换焊接工艺 |
+| weld_controller | weld_remote_interface_node | 执行第三方高级焊接指令，当前默认dry-run |
+| weld_controller | weld_logic_node | 历史固定点号工艺逻辑，当前不运行 |
 
 整体链路：
 
@@ -27,10 +28,15 @@ ABB
  -> data_receiver_node
  -> ABB
 
-ABB点序号
- -> weld_logic_node
+192.168.3.5（正式入站协议待定）或ROS模拟话题
+ -> weld_remote_interface_node
  -> weld_controller_node / motor_control_node
  -> 焊机 / 旋转电机
+
+weld_controller_node
+ -> /weld/feedback_raw（每个TPDO1的6字节）
+ -> data_receiver_node
+ -> 192.168.3.5:50000
 ~~~
 
 ---
@@ -53,9 +59,10 @@ ABB点序号
 | listen_host | 192.168.125.2 | 本机ABB通信网卡地址 |
 | listen_port | 45000 | TCP监听端口 |
 | abb_allowed_ip | 192.168.125.1 | 允许连接的ABB地址 |
-| forward_ip | 192.168.125.5 | 第三方工控机地址 |
+| forward_ip | 192.168.3.5 | 第三方控制设备地址 |
 | forward_port | 50000 | 第三方TCP端口 |
 | forward_queue_size | 500 | 第三方转发队列容量 |
+| weld_feedback_topic | /weld/feedback_raw | 焊机逐帧原始反馈话题 |
 
 ### 2.3 话题
 
@@ -65,7 +72,7 @@ ABB点序号
 | 发布 | /abb/weld_point | geometry_msgs/msg/Point | 从 P... 文本提取的XYZ |
 | 订阅 | /abb/tx_text | std_msgs/msg/String | 等待发给ABB的ASCII文本 |
 | 发布 | /abb/tx_status | std_msgs/msg/String | OK或ERROR发送状态 |
-| 订阅 | /weld/status | std_msgs/msg/String | 提取焊机RX六字节帧供第三方转发 |
+| 订阅 | /weld/feedback_raw | std_msgs/msg/UInt8MultiArray | 将焊机RX六字节帧原样转发到第三方 |
 
 ### 2.4 使用示例
 
@@ -79,7 +86,7 @@ ros2 run cimc data_receiver_node
 ros2 run cimc data_receiver_node --ros-args \
   -p listen_host:=192.168.125.2 \
   -p abb_allowed_ip:=192.168.125.1 \
-  -p forward_ip:=192.168.125.5
+  -p forward_ip:=192.168.3.5
 ~~~
 
 模拟待发文本：
@@ -95,6 +102,7 @@ ros2 topic pub --once /abb/tx_text std_msgs/msg/String \
 - ABB 未连接时，当前待发消息会丢弃，避免重连后误发旧轨迹。
 - TCP 可能拆包和粘包；当前没有完整的跨 recv() 半包缓存。
 - 第三方通道混合转发 ABB 原始数据和焊机反馈，需要双方约定协议。
+- 192.168.3.5 的入站命令格式尚未确定，当前不从 TCP 连接解析焊接命令。
 
 ---
 
@@ -440,6 +448,7 @@ ros2 run cimc handeye_abb_bridge_node --ros-args \
 | 订阅 | /weld/control | std_msgs/msg/String | 焊机动作命令 |
 | 订阅 | /weld/set_param_real | Float32MultiArray | [电流A, 目标电压V] |
 | 发布 | /weld/status | String | TX/RX帧、状态、故障和反馈值 |
+| 发布 | /weld/feedback_raw | UInt8MultiArray | 每个真实TPDO1的原始6字节 |
 
 ### 8.3 控制命令
 
@@ -473,9 +482,59 @@ ros2 topic pub --once /weld/set_param_real std_msgs/msg/Float32MultiArray \
 
 ---
 
-## 9. weld_logic_node
+## 9. weld_remote_interface_node
 
 ### 9.1 当前功能
+
+- 作为 192.168.3.5 外部工艺决策与现有焊机/旋转电机话题之间的执行边界。
+- 不按 ABB 点号选择工艺，不包含固定工艺表。
+- 默认一元模式：实时设定数据为 `[电流A, 旋转速度r/s]`，电压占位值不参与内置曲线计算。
+- 启动时不自动发任何控制命令。
+- 默认 `output_enabled=false`，可在无硬件动作时完整模拟指令顺序。
+- 默认要求先 `GAS_ON`，再接受 `WELD_START`。
+
+### 9.2 接口
+
+| 方向 | 名称 | 类型 | 作用 |
+|---|---|---|---|
+| 订阅 | /weld/remote/command | String | GAS_ON、WELD_START、WELD_STOP等高级命令 |
+| 订阅 | /weld/remote/setpoints | Float32MultiArray | [电流A, 旋转速度r/s] |
+| 发布 | /weld/remote/status | String | 接受/拒绝、是否转发、dry-run和状态 |
+| 发布 | /weld/control | String | 映射后的底层焊机动作 |
+| 发布 | /weld/set_param_real | Float32MultiArray | [电流A, 一元模式电压占位V] |
+| 发布 | /cimc/motor_speed | Float32 | 旋转速度r/s |
+
+### 9.3 高级命令
+
+| 命令 | 作用 |
+|---|---|
+| GAS_ON / START_GAS | 请求一元内置曲线、启动CAN轮询并送气 |
+| WELD_START / START_WELDING | 开始焊接；默认必须先送气 |
+| WELD_STOP / STOP_WELDING / STOP_ALL | 停焊并停止旋转电机 |
+| FAULT_RESET | 焊机故障复位 |
+
+### 9.4 当前安全模拟
+
+~~~bash
+ros2 run weld_controller weld_remote_interface_node --ros-args \
+  --params-file ~/x86_ros2_ws/src/weld_controller/config/weld_remote_interface.yaml
+ros2 topic echo /weld/remote/status
+ros2 topic pub --once /weld/remote/command std_msgs/msg/String "{data: 'GAS_ON'}"
+ros2 topic pub --once /weld/remote/setpoints std_msgs/msg/Float32MultiArray \
+  "{data: [250.0, 6.0]}"
+ros2 topic pub --once /weld/remote/command std_msgs/msg/String "{data: 'WELD_START'}"
+ros2 topic pub --once /weld/remote/command std_msgs/msg/String "{data: 'WELD_STOP'}"
+~~~
+
+保持配置中的 `output_enabled=false` 时以上命令只模拟，不会发往焊机或电机。正式网络字符协议确定后，网络层应发布同一组输入话题。
+
+`/weld/remote/status` 中的 `forwarded=true` 仅表示消息已发布到 ROS 底层话题，不是 CAN、串口或物理执行成功应答。
+
+---
+
+## 10. weld_logic_node（历史保留，不运行）
+
+### 10.1 当前功能
 
 - 根据ABB到达点的序号切换焊接电流、电压和旋弧速度。
 - 监听焊机反馈，等待起弧成功后进入正式工艺。
@@ -483,7 +542,7 @@ ros2 topic pub --once /weld/set_param_real std_msgs/msg/Float32MultiArray \
 - 启动3秒后自动请求焊机start_system。
 - 焊机状态丢失超过3秒时尝试重新激活。
 
-### 9.2 接口
+### 10.2 接口
 
 | 方向 | 名称 | 类型 | 作用 |
 |---|---|---|---|
@@ -495,7 +554,7 @@ ros2 topic pub --once /weld/set_param_real std_msgs/msg/Float32MultiArray \
 | 发布 | /weld/set_param_real | Float32MultiArray | [电流, 电压] |
 | 发布 | /cimc/motor_speed | Float32 | 旋弧速度 |
 
-### 9.3 现有固定点流程
+### 10.3 现有固定点流程
 
 - 第一条数字作为本次ABB序号基准，内部归一化为0。
 - 点0：安全过渡点。
@@ -506,7 +565,7 @@ ros2 topic pub --once /weld/set_param_real std_msgs/msg/Float32MultiArray \
 - 点8：停止焊接和电机。
 - 点9：任务结束并清除序号基准。
 
-### 9.4 手动命令
+### 10.4 手动命令
 
 | 命令 | 作用 |
 |---|---|
@@ -528,7 +587,7 @@ ros2 topic pub --once /cimc/override_param std_msgs/msg/Float32MultiArray \
   "{data: [250.0, 30.0, 6.0]}"
 ~~~
 
-### 9.5 当前重要限制
+### 10.5 当前重要限制
 
 - 仍按固定9个物理点设计，与焊缝算法可变点数不匹配，暂时不应加入真实自动焊接。
 - 工艺参数和延时是C++常量，修改后需重新编译。
@@ -538,7 +597,7 @@ ros2 topic pub --once /cimc/override_param std_msgs/msg/Float32MultiArray \
 
 ---
 
-## 10. 当前建议
+## 11. 当前建议
 
 现阶段可以分别测试：
 
@@ -548,6 +607,7 @@ ros2 topic pub --once /cimc/override_param std_msgs/msg/Float32MultiArray \
 - weld_seam_node
 - handeye_abb_bridge_node（保持 send_to_abb=false）
 - weld_controller_node（先不实际起弧）
+- weld_remote_interface_node（保持 output_enabled=false）
 
 真实自动焊接前还需要完成：
 
@@ -555,12 +615,12 @@ ros2 topic pub --once /cimc/override_param std_msgs/msg/Float32MultiArray \
 2. 确认ABB发送的是拍照瞬间 Base_from_TCP。
 3. 确认ABB和ROS四元数顺序、坐标系和工具方向。
 4. 为ABB轨迹增加接收应答。
-5. 优化weld_logic_node，使其支持可变点数和工艺元数据。
+5. 确定192.168.3.5的入站命令与出站混合数据分帧协议，并映射到remote话题。
 6. 增加工作空间、碰撞、干涉和姿态跳变安全检查。
 
 ---
 
-## 11. 常用检查命令
+## 12. 常用检查命令
 
 每个新终端先执行：
 
@@ -581,4 +641,3 @@ ros2 node info /weld_seam_node
 ros2 param list /weld_seam_node
 ros2 param get /weld_seam_node auto_process
 ~~~
-

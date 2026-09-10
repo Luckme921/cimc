@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/u_int8_multi_array.hpp>
 #include <pthread.h>
 #include <unistd.h>
 #include <math.h>
@@ -77,6 +78,8 @@ public:
             "weld/set_param_real", 10, std::bind(&WeldControllerNode::set_param_callback, this, std::placeholders::_1));
 
         status_pub_ = this->create_publisher<std_msgs::msg::String>("weld/status", 10);
+        feedback_raw_pub_ = this->create_publisher<std_msgs::msg::UInt8MultiArray>(
+            "weld/feedback_raw", 50);
 
         timer_ = this->create_wall_timer(
             std::chrono::milliseconds(500), 
@@ -142,6 +145,12 @@ private:
         
         weld_status_.has_data = true;
         pthread_mutex_unlock(&status_mutex_);
+
+        // 每个 TPDO1 真实反馈帧独立发布。网络转发层直接使用
+        // 这 6 字节，不再从 2 Hz 仪表盘文本中用正则表达式反向提取。
+        std_msgs::msg::UInt8MultiArray feedback;
+        feedback.data.assign(data, data + 6);
+        feedback_raw_pub_->publish(feedback);
     }
 
     void dashboard_timer_callback() {
@@ -387,6 +396,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_control_;
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr sub_param_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
+    rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr feedback_raw_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
 };
 

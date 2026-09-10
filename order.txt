@@ -38,7 +38,7 @@ ros2 run cimc motor_control_node --ros-args -p serial_port:=/dev/ttyUSB0 -p baud
 # 3. ABB 数据接收/转发
 # ============================================================
 ros2 run cimc data_receiver_node
-ros2 run cimc data_receiver_node --ros-args -p listen_host:=192.168.125.2 -p abb_allowed_ip:=192.168.125.1 -p forward_ip:=192.168.125.5
+ros2 run cimc data_receiver_node --ros-args -p listen_host:=192.168.125.2 -p abb_allowed_ip:=192.168.125.1 -p forward_ip:=192.168.3.5
 ros2 topic echo /abb/raw_text
 ros2 topic echo /abb/weld_point
 
@@ -398,3 +398,63 @@ cd ~/x86_ros2_ws
 ros2 launch cimc camera_weld_handeye_test.launch.py
 
 # launch就绪后，再按第10.3节发布当前拍照TCP位姿的START_CAPTURE消息。
+
+# ============================================================
+# 12. 192.168.3.5焊接高级指令ROS模拟（当前仅dry-run，不接硬件输出）
+#     不属于camera_weld_handeye_test.launch，必须单独启动
+# ============================================================
+
+# ------------------------------------------------------------
+# 12.1 安全确认
+# ------------------------------------------------------------
+# 期望 output_enabled: false。为避免物理动作，本节不要启动：
+# ros2 run weld_controller weld_controller_node
+# ros2 run cimc motor_control_node
+# ros2 run weld_controller weld_logic_node
+rg -n "output_enabled|require_gas_before_weld|max_current|max_rotation" \
+  ~/x86_ros2_ws/src/weld_controller/config/weld_remote_interface.yaml
+
+# ------------------------------------------------------------
+# 12.2 终端A：启动第三方焊接指令执行接口
+# ------------------------------------------------------------
+ros2 run weld_controller weld_remote_interface_node --ros-args \
+  --params-file ~/x86_ros2_ws/src/weld_controller/config/weld_remote_interface.yaml
+
+# 期望显示：output_enabled=false、mode=unary、Dry-run is active。
+
+# ------------------------------------------------------------
+# 12.3 终端B：先监听模拟指令结果
+# ------------------------------------------------------------
+ros2 topic echo /weld/remote/status
+
+# ------------------------------------------------------------
+# 12.4 终端C：按真实工况顺序模拟192.168.3.5高级指令
+# ------------------------------------------------------------
+# 以下消息在output_enabled=false时只验证，不发布到/weld/control、
+# /weld/set_param_real或/cimc/motor_speed。
+ros2 topic pub --once /weld/remote/command std_msgs/msg/String \
+  "{data: 'GAS_ON'}"
+ros2 topic pub --once /weld/remote/setpoints std_msgs/msg/Float32MultiArray \
+  "{data: [250.0, 6.0]}"
+ros2 topic pub --once /weld/remote/command std_msgs/msg/String \
+  "{data: 'WELD_START'}"
+
+# 焊接过程中可重复发布setpoints，模拟3.5实时调节一元电流和旋转速度：
+ros2 topic pub --once /weld/remote/setpoints std_msgs/msg/Float32MultiArray \
+  "{data: [245.0, 5.5]}"
+
+# 结束焊接，同时请求旋转速度归零：
+ros2 topic pub --once /weld/remote/command std_msgs/msg/String \
+  "{data: 'WELD_STOP'}"
+
+# 期望status顺序：
+# gas_on -> SETPOINTS accepted -> welding -> SETPOINTS accepted -> idle
+# 当前每条状态都应为 accepted=true、forwarded=false、dry_run=true。
+
+# ------------------------------------------------------------
+# 12.5 当前网络边界
+# ------------------------------------------------------------
+# data_receiver_node的forward_ip当前为192.168.3.5，真实焊机每个TPDO1
+# 反馈会从/weld/feedback_raw以原始6字节加入TCP转发队列。
+# 3.5发回本机的字符/二进制格式尚未确定，所以目前只用上述ROS话题模拟入站指令。
+# 正式协议还必须确定消息边界，或把ABB文本和焊机6字节反馈分配到不同端口。

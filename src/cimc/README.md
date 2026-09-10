@@ -7,7 +7,7 @@
 | 文件 | 作用 |
 |---|---|
 | `cimc/motor_control_node.py` | 订阅转速，使用串口协议控制偏心旋转焊枪电机；支持拔插检测和定时重连 |
-| `cimc/data_receiver_node.py` | TCP 接收 ABB 文本/坐标，同时异步转发 ABB 原始流和焊机 6 字节反馈到另一工控机 |
+| `cimc/data_receiver_node.py` | TCP 接收 ABB 文本/坐标，同时异步转发 ABB 原始流和焊机逐帧 6 字节反馈到 192.168.3.5 |
 | `cimc/weld_task_coordinator_node.py` | 协调一次拍照、自动提取和手眼变换任务 |
 | `cimc/handeye_abb_bridge_node.py` | 把相机系焊接位姿转换到拍照时 TCP 所在基坐标系 |
 | `config/handeye_bridge.yaml` | 手眼矩阵路径、方向、单位、输出坐标系和发送安全开关 |
@@ -71,15 +71,15 @@ sudo usermod -aG dialout "$USER"
 
 ```text
 ABB 192.168.125.1 -> 本机 192.168.125.2:45000 -> ROS 话题
-                                           \-> 异步队列 -> 192.168.125.5:50000
-/weld/status 中严格匹配到的 RX 6 字节反馈 -----------/
+                                           \-> 异步队列 -> 192.168.3.5:50000
+/weld/feedback_raw 的逐帧 6 字节 TPDO1 反馈 --------/
 ```
 
 接口：
 
 - 发布 `/abb/raw_text`，`std_msgs/msg/String`：ABB 原始 ASCII 文本；
 - 发布 `/abb/weld_point`，`geometry_msgs/msg/Point`：解析 `P...:x,y,z,...` 的前三个坐标；
-- 订阅 `/weld/status`，`std_msgs/msg/String`：只匹配 `[<- RX 接收 ... 原始帧: xx xx xx xx xx xx]`，避免误转发 TX 帧。
+- 订阅 `/weld/feedback_raw`，`std_msgs/msg/UInt8MultiArray`：接收焊机驱动逐帧发布的 6 字节 TPDO1，并原样加入 TCP 转发队列。
 
 可调 ROS 参数：
 
@@ -88,9 +88,10 @@ ABB 192.168.125.1 -> 本机 192.168.125.2:45000 -> ROS 话题
 | `listen_host` | `192.168.125.2` | 本机绑定地址，必须实际配置在某网卡上 |
 | `listen_port` | `45000` | ABB 连接的 TCP 监听端口 |
 | `abb_allowed_ip` | `192.168.125.1` | 只允许该 ABB 来源 IP |
-| `forward_ip` | `192.168.125.5` | 第三方工控机地址 |
+| `forward_ip` | `192.168.3.5` | 第三方控制设备地址 |
 | `forward_port` | `50000` | 第三方 TCP 服务端口 |
 | `forward_queue_size` | `500` | 非阻塞转发队列容量 |
+| `weld_feedback_topic` | `/weld/feedback_raw` | 焊机原始反馈帧话题 |
 
 接收线程不等待第三方转发成功；转发断线时后台线程重连，所以第三方工控机故障不会阻塞 ABB 接收。队列满时当前代码按实时优先策略丢弃新数据，不让控制路径无限积压。
 
@@ -100,8 +101,10 @@ ABB 192.168.125.1 -> 本机 192.168.125.2:45000 -> ROS 话题
 ros2 run cimc data_receiver_node --ros-args \
   -p listen_host:=192.168.125.2 \
   -p abb_allowed_ip:=192.168.125.1 \
-  -p forward_ip:=192.168.125.5
+  -p forward_ip:=192.168.3.5
 ```
+
+当前只完成“本机主动连接 192.168.3.5 并发送 ABB 原始流/焊机反馈”的出口。192.168.3.5 发回本机的正式命令字符、粘包拆包和帧边界协议尚未确定，因此尚不从该 TCP 连接解释焊接命令；现阶段使用 `weld_remote_interface_node` 的 `/weld/remote/*` 话题模拟。TCP 本身不保留消息边界，正式协议必须进一步明确 ABB 文本与焊机 6 字节帧的分帧规则，或为二者分配不同端口。
 
 部署前检查：
 
