@@ -241,8 +241,8 @@ ros2 node list
 # ------------------------------------------------------------
 # 当前TCP +Z定义为“枪体/body -> TCP/焊丝尖端”，因此算法应保持：
 # orientation.tool_positive_z_points_from_tcp_to_body=false
-# 当前true表示Tool +X取算法输出路径的正向。若现场确认正负相反，
-# 只修改weld_seam.yaml中的true为false，再重启launch。
+# 当前false表示Tool +X取算法工件-X方向。若现场确认正负相反，
+# 只在weld_seam.yaml中将该布尔值在false/true之间切换，再重启launch。
 rg -n "tool_positive_z|tool_x_reference|tool_x_points" \
   ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
 rg -n "matrix_file|matrix_direction|send_to_abb" \
@@ -308,8 +308,8 @@ ros2 topic echo --once --qos-durability transient_local --qos-reliability reliab
 # ------------------------------------------------------------
 # 保持send_to_abb=false，只在示教器中手动、低速验证一个中间焊接点。
 # 如果XYZ正确、TCP +Z朝向正确，但TCP +X相对“点0 -> 后续焊接点”方向反向，
-# 将weld_seam.yaml中的tool_x_points_along_positive_workpiece_x改为false并重启launch。
-# 如果TCP +X已与轨迹前进方向一致，则保持true；不要同时修改手眼矩阵方向。
+# 只将weld_seam.yaml中的tool_x_points_along_positive_workpiece_x在false/true之间切换并重启launch。
+# 如果TCP +X已与预期轨迹前进方向一致，则保持当前值；不要同时修改手眼矩阵方向。
 # 单点确认后再逐点验证；本测试launch始终不会自动发送或执行机器人轨迹。
 
 # ------------------------------------------------------------
@@ -317,3 +317,84 @@ ros2 topic echo --once --qos-durability transient_local --qos-reliability reliab
 # ------------------------------------------------------------
 # 在终端A按Ctrl+C停止整条launch链。确认只剩预期节点：
 ros2 node list
+
+# ============================================================
+# 11. 每次现场推荐顺序：实时取景 -> 保存PLY离线验算法 -> 启动launch
+#     本节只做点云和轨迹计算，不启动ABB通信/运动、焊机和电机
+# ============================================================
+
+# ------------------------------------------------------------
+# 11.1 终端A：打开相机实时PLY点云窗口
+# ------------------------------------------------------------
+cd ~/x86_ros2_ws/x86_chishine_live_viewer
+./build/chishine_live_viewer \
+  --network true \
+  --usb false \
+  --depth-min-mm 100 \
+  --depth-max-mm 600 \
+  --gain 1 \
+  --frame-time 10000 \
+  --exposure 8000 \
+  --point-size 2 \
+  --max-display-points 600000 \
+  --save-dir /home/mini/scut_weld_data/pointclouds
+
+# 取景满意后按 S 保存，记住终端打印的 Saved snapshot 绝对路径。
+# 文件名形如：live_20260910_173000_123.ply。
+# 保存后按 Q/Esc 退出窗口；必须先释放相机，再继续下面步骤。
+pgrep -af chishine_live_viewer
+
+# ------------------------------------------------------------
+# 11.2 终端B：只启动焊缝提取节点，读取当前src中的YAML
+# ------------------------------------------------------------
+ros2 run weld_seam_perception weld_seam_node --ros-args \
+  --params-file ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
+
+# 等待终端B显示“Weld seam SDK ... ready”后再发布PLY路径。
+# 终端B会打印特征点、姿态、路径点数、CSV和_result.ply路径。
+
+# ------------------------------------------------------------
+# 11.3 终端C：把刚保存的最新live_*.ply交给焊缝节点
+# ------------------------------------------------------------
+PLY_FILE="$(find /home/mini/scut_weld_data/pointclouds -maxdepth 1 -type f \
+  -name 'live_*.ply' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
+printf 'About to process: %s\n' "$PLY_FILE"
+test -n "$PLY_FILE" && test -s "$PLY_FILE"
+
+# 务必确认上面打印的正是本次按S保存的文件；不是则手动设定绝对路径：
+# PLY_FILE="/home/mini/scut_weld_data/pointclouds/live_YYYYMMDD_HHMMSS_mmm.ply"
+
+# QoS与焊缝节点的transient-local订阅匹配；auto_process=true时只处理一次。
+ros2 topic pub --once \
+  --qos-durability transient_local \
+  --qos-reliability reliable \
+  /camera/pointcloud_file std_msgs/msg/String \
+  "{data: '$PLY_FILE'}"
+
+# ------------------------------------------------------------
+# 11.4 终端C：检查本次离线提取结果
+# ------------------------------------------------------------
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable \
+  /weld_seam/result_csv
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable \
+  /weld_seam/result_visualization
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable \
+  /weld_seam/poses_camera_frame
+ls -lt /home/mini/scut_weld_data/weld_results | head
+
+# *_features.csv是位置/姿态数据；*_result.ply是红色焊缝、粉色特征点和白色工具轴可视化结果。
+# 当前工控机未安装pcl_viewer，请用现有PLY查看工具打开_result.ply检查。
+# 实时查看器保存帧与launch后ROS相机节点重新拍摄的正式帧可有小量差异。
+
+# ------------------------------------------------------------
+# 11.5 关闭离线检查，然后启动完整测试launch
+# ------------------------------------------------------------
+# 在终端B按 Ctrl+C 停止weld_seam_node；实时查看器应已在11.1退出。
+# 确认没有遗留的相机/焊缝/手眼/协调节点：
+ros2 node list
+
+# 新终端执行：
+cd ~/x86_ros2_ws
+ros2 launch cimc camera_weld_handeye_test.launch.py
+
+# launch就绪后，再按第10.3节发布当前拍照TCP位姿的START_CAPTURE消息。
