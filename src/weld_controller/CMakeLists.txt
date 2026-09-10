@@ -33,19 +33,12 @@ target_link_libraries(weld_controller_node
   ${CONTROLCAN_LIBRARY} Threads::Threads)
 ament_target_dependencies(weld_controller_node rclcpp std_msgs)
 
-# 依用保留并编译，但前期分节点调试时不启动。
-add_executable(weld_logic_node src/weld_logic_node.cpp)
-target_compile_features(weld_logic_node PRIVATE cxx_std_17)
-ament_target_dependencies(weld_logic_node rclcpp std_msgs)
-
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(weld_controller_node PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_options(weld_logic_node PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 install(TARGETS
   weld_controller_node
-  weld_logic_node
   DESTINATION lib/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 ament_package()

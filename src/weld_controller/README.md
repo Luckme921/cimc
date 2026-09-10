@@ -1,6 +1,6 @@
 # weld_controller 包说明：USB-CAN 焊机驱动
 
-`weld_controller_node` 是实际 CAN 驱动。旧 `weld_logic_node` 仍保留用于历史对比和回退，但它按 ABB 点号自行决定工艺，当前架构不再运行它。
+`weld_controller_node` 是本包唯一构建和安装的节点。旧 `weld_logic_node.cpp` 仅保留用于历史对比；它按 ABB 点号自行决定工艺，当前架构不编译或运行它。
 
 `192.168.3.5` 的 JSONL v1 解析和底层话题映射由 `cimc/data_receiver_node.py` 完成，不在本包再增加中间焊接大脑。协议见仓库根目录的 `第三方焊接通信协议.md`。
 
@@ -9,7 +9,7 @@
 | 文件 | 作用 |
 |---|---|
 | `src/weld_controller_node.cpp` | 调用 `controlcan.h/libcontrolcan.so`，发送焊机 CAN 帧、轮询状态、发布诊断 |
-| `src/weld_logic_node.cpp` | 历史固定点号工艺大脑；保留源码但当前不运行 |
+| `src/weld_logic_node.cpp` | 历史固定点号工艺大脑；仅保留源码，不编译、不安装 |
 | `CMakeLists.txt` | 严格查找 controlcan 头文件/库并链接 `Threads::Threads` |
 | `package.xml` | ROS 2 C++ 和标准消息依赖 |
 
@@ -64,9 +64,9 @@ ros2 topic pub --once /weld/set_param_real std_msgs/msg/Float32MultiArray \
 
 焊机与 CAN 盒属于实际执行设备。任何点火/送丝命令都应在设备安全、人员撤离和急停有效的条件下测试。
 
-## weld_logic_node（历史节点，不运行）
+## weld_logic_node.cpp（历史源码，不编译）
 
-旧节点订阅 ABB 点号并用 C++ 固定表决定电流、电压和转速，而且启动后会自动请求 `start_system`。它与“192.168.3.5 决定工艺、x86 只执行”的新职责冲突，因此没有加入任何 launch，当前不要启动。
+旧源码订阅 ABB 点号并用 C++ 固定表决定电流、电压和转速，而且节点启动后会自动请求 `start_system`。它与“192.168.3.5 决定工艺、x86 只执行”的新职责冲突，因此已从 CMake 构建和安装目标移除，不能再通过 `ros2 run` 启动。
 
 ## 构建与运行库检查
 
@@ -79,4 +79,4 @@ source install/setup.bash
 ldd install/weld_controller/lib/weld_controller/weld_controller_node
 ```
 
-`ldd` 不应出现 `libcontrolcan.so => not found`。本包不提供 launch，避免误启动 `weld_logic_node`。
+`ldd` 不应出现 `libcontrolcan.so => not found`。本包不提供 launch，安装环境只应列出 `weld_controller_node`。

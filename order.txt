@@ -77,20 +77,9 @@ ros2 topic echo /weld_seam/status
 ros2 topic echo --once /weld_seam/poses_camera_frame
 
 # ============================================================
-# 7. weld_logic_node（前期不运行；以下命令保留供后续验证）
+# 7. 历史焊接大脑
 # ============================================================
-# ros2 run weld_controller weld_logic_node
-ros2 topic echo /abb/raw_text
-ros2 topic echo /weld/control
-ros2 topic echo /weld/set_param_real
-ros2 topic echo /cimc/motor_speed
-ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'MODE_MANUAL'}"
-ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'MODE_AUTO'}"
-ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'ESTOP'}"
-ros2 topic pub --once /cimc/override_param std_msgs/msg/Float32MultiArray "{data: [280.0, 26.5, 3.0]}"
-ros2 topic pub -r 10 /cimc/override_param std_msgs/msg/Float32MultiArray "{data: [250.0, 25.0, 2.5]}"
-ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'USE_CALC'}"
-ros2 topic pub --once /cimc/override_cmd std_msgs/msg/String "{data: 'USE_BUILTIN'}"
+# weld_logic_node.cpp仅保留历史源码，已不再编译和安装，没有运行命令。
 
 # ============================================================
 # 8. 打开 Codex 并恢复上一次会话
@@ -109,7 +98,6 @@ codex resume --last
 # 本轮不要启动以下节点：
 # ros2 run cimc data_receiver_node
 # ros2 run weld_controller weld_controller_node
-# ros2 run weld_controller weld_logic_node
 # ros2 run cimc motor_control_node
 #
 # handeye_abb_bridge_node 必须保持 send_to_abb=false。
@@ -278,7 +266,7 @@ ros2 param get /weld_seam_node algorithm_overrides
 # launch直接读取主工作区src中的四个节点YAML，不在launch里覆盖参数。
 # launch预检发现send_to_abb不是false时会拒绝启动。
 # 本launch不会启动：data_receiver_node、weld_controller_node、
-# weld_logic_node、motor_control_node。
+# motor_control_node。历史weld_logic_node已不再构建。
 
 # ------------------------------------------------------------
 # 10.3 终端C：触发一次拍照和完整计算
@@ -417,7 +405,7 @@ sed -n '1,220p' ~/x86_ros2_ws/src/cimc/config/data_receiver.yaml
 # 12.2 当前无3.5时：只监听协议解析后应出现的底层话题
 # ------------------------------------------------------------
 # 重要：本节只用于观察ROS消息。不要启动weld_controller_node、
-# motor_control_node或weld_logic_node，否则下面的话题会操作真实焊机/电机。
+# motor_control_node，否则下面的话题会操作真实焊机/电机。
 # 终端A：
 ros2 topic echo /weld/control
 
@@ -470,7 +458,7 @@ ros2 topic pub --once /cimc/motor_speed std_msgs/msg/Float32 \
 # ros2 run weld_controller weld_controller_node
 # ros2 run cimc motor_control_node
 #
-# 禁止启动：ros2 run weld_controller weld_logic_node
+# 历史weld_logic_node已不再构建，不存在启动命令。
 # 监视协议解析：ros2 topic echo /third_party/status
 # 监视焊机反馈：ros2 topic echo /weld/feedback_raw
 #

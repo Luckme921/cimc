@@ -141,4 +141,4 @@ source install/setup.bash
 ros2 launch cimc camera_weld_handeye_test.launch.py
 ```
 
-该 launch 不启动 `data_receiver_node`、`weld_controller_node`、`weld_logic_node` 或 `motor_control_node`。它只指定主工作区 `src` 内的四个 ROS 参数 YAML，不在 launch 里覆盖参数值。手眼配置必须显式保持 `send_to_abb: false`，否则测试 launch 会在启动节点前拒绝运行。
+该 launch 不启动 `data_receiver_node`、`weld_controller_node` 或 `motor_control_node`；历史 `weld_logic_node` 已不再构建。它只指定主工作区 `src` 内的四个 ROS 参数 YAML，不在 launch 里覆盖参数值。手眼配置必须显式保持 `send_to_abb: false`，否则测试 launch 会在启动节点前拒绝运行。

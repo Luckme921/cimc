@@ -27,7 +27,7 @@ x86_ros2_ws/
     └── weld_seam_perception/    # C++：进程内调用 weld_seam_sdk
 ```
 
-仓库根目录的三个参考/SDK目录通过 `COLCON_IGNORE` 与 ROS package 隔离。当前机器仍优先使用 `~/x86_chishine_camera_test/vendor_sdk` 和 `~/scut_weld_sdk_install`；换机时需要按本文设置 SDK 路径。`weld_logic_node` 仍编译和安装用于历史回退，但当前架构不运行它；第三方命令由 `data_receiver_node` 直接映射到底层话题。
+仓库根目录的三个参考/SDK目录通过 `COLCON_IGNORE` 与 ROS package 隔离。当前机器仍优先使用 `~/x86_chishine_camera_test/vendor_sdk` 和 `~/scut_weld_sdk_install`；换机时需要按本文设置 SDK 路径。旧 `weld_logic_node.cpp` 只保留为历史源码，不再编译或安装；第三方命令由 `data_receiver_node` 直接映射到底层话题。
 
 每个包目录均有自己的中文 `README.md`，说明内部源码、参数和接口。
 
@@ -72,7 +72,7 @@ flowchart LR
 | 任务协调与手眼桥接 | 完整链路已输出 8 个基坐标位姿，XYZ 初步现场对齐；需重建 TCP、重做手眼后再验证姿态与可达性 |
 | ABB 自动接收/发送 | 保留接口；本轮无机械臂通信测试不启动 |
 | 焊机与旋弧电机远程执行 | JSONL v1 和直接话题映射已实现；一元模式为默认，真实焊机/电机及 192.168.3.5 待联调 |
-| 旧固定点号工艺逻辑 | 不再作为当前架构的大脑；保留源码回退，不启动 |
+| 旧固定点号工艺逻辑 | 不再作为当前架构的大脑；仅保留源码，不编译、不安装 |
 
 下一次现场主流程只执行一次完整任务：全部计算节点先就绪，再模拟 `START_CAPTURE`，由协调节点触发唯一一次拍照、焊缝提取和手眼变换。直接调用 `/camera/capture` 只保留作相机/算法独立排障，不插入主流程。
 
@@ -276,7 +276,7 @@ ros2 topic echo /weld/status
 ros2 topic echo /weld/feedback_raw
 ```
 
-`weld_logic_node` 不再运行，也没有新增中间“焊接大脑”节点。`data_receiver_node` 收到 192.168.3.5 的 JSONL v1 请求后，直接发布 `/weld/control`、`/weld/set_param_real` 和 `/cimc/motor_speed`。网络配置位于：
+`weld_logic_node.cpp` 只保留为历史源码，不再构建，也没有新增中间“焊接大脑”节点。`data_receiver_node` 收到 192.168.3.5 的 JSONL v1 请求后，直接发布 `/weld/control`、`/weld/set_param_real` 和 `/cimc/motor_speed`。网络配置位于：
 
 ```bash
 ros2 run cimc data_receiver_node --ros-args \
@@ -428,9 +428,9 @@ ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
 ## 14. 开机运行前的安全边界
 
 1. 相机和算法节点只采集/计算/发布文件与位姿，不应直接驱动 ABB。
-2. `weld_logic_node` 已停用；第三方协议直接映射现有焊机和电机话题，不再运行中间远程接口节点。
+2. `weld_logic_node.cpp` 仅作历史源码保留且不再构建；第三方协议直接映射现有焊机和电机话题。
 3. 在机械臂自动运行前，先离线确认粉红十字中心、四元数、手眼矩阵、枪尖 TCP、工件坐标以及凹角干涉余量。
-4. 本轮无 ABB/焊接执行验证不启动 `data_receiver_node`、`weld_controller_node`、`weld_logic_node` 或 `motor_control_node`。
+4. 本轮无 ABB/焊接执行验证不启动 `data_receiver_node`、`weld_controller_node` 或 `motor_control_node`。
 5. 手眼桥始终保持 `send_to_abb=false`；不能为了获得易读文本临时打开真实发送。
 6. 首次人工验证应低速、单点、空载、禁弧，并由操作者在示教器上逐点确认；本工作区当前不具备碰撞、关节限位或可达性规划能力。
 

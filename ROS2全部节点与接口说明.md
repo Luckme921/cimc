@@ -2,7 +2,7 @@
 
 ## 1. 当前节点总览
 
-本文以当前 x86_ros2_ws/src 源码为准。系统现有 8 个业务节点：
+本文以当前 x86_ros2_ws/src 源码为准。系统现有 7 个已构建业务节点：
 
 | 包 | 节点 | 当前职责 |
 |---|---|---|
@@ -13,7 +13,6 @@
 | chishine_camera_ros2 | chishine_camera_node | 发现/连接相机、软件触发、保存PLY |
 | weld_seam_perception | weld_seam_node | 调用焊缝SDK并发布CSV、PLY和PoseArray |
 | weld_controller | weld_controller_node | USB-CAN控制焊机、解析焊机反馈 |
-| weld_controller | weld_logic_node | 历史固定点号工艺逻辑，当前不运行 |
 
 整体链路：
 
@@ -518,9 +517,11 @@ ros2 topic pub --once /weld/set_param_real std_msgs/msg/Float32MultiArray \
 
 ---
 
-## 10. weld_logic_node（历史保留，不运行）
+## 10. weld_logic_node.cpp（历史保留，不编译）
 
 ### 10.1 当前功能
+
+以下内容仅用于解释历史源码。该目标已从 CMake 和安装环境移除，不能通过 `ros2 run` 启动。
 
 - 根据ABB到达点的序号切换焊接电流、电压和旋弧速度。
 - 监听焊机反馈，等待起弧成功后进入正式工艺。
