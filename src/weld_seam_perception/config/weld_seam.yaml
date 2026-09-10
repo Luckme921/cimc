@@ -10,11 +10,112 @@ weld_seam_node:
     # 算法 CSV 是 mm，ROS2 PoseArray 按 REP-103 发布为 m。
     position_scale_to_ros: 0.001
     auto_process: true
+
+    # SDK 参数使用说明：
+    # 1. 每项必须是完整字符串：- "key=value"。
+    # 2. 下面已启用的 5 项是当前现场配置，本次不改变。
+    # 3. 其余是 SDK 2.2.1 默认值模板；删掉行首的 "# " 即可启用。
+    # 4. 不要同时启用同一 key 的多行；修改后重启节点/launch 生效，无需编译。
+    # 5. config_file 非空时先读外部 .conf，algorithm_overrides 再覆盖同名项。
     algorithm_overrides:
+      # ==================== 当前现场已启用值 ====================
       - "roi.enable=false"
       - "normal.mode=auto"
       - "orientation.tool_positive_z_points_from_tcp_to_body=false"
       # Tool +X 参考固定工件焊接前进轴，减少不同角点间绕焊枪轴滚转。
-      # 若现场 TCP +X 与焊接前进方向相反，只把下一项 true 改为 false。
+      # 当前 false 表示工具 +X 指向工件 -X；如需反转，只在 false/true 之间切换。
       - "orientation.tool_x_reference=workpiece_x"
       - "orientation.tool_x_points_along_positive_workpiece_x=false"
+
+      # ==================== ROI（相机/PLY 坐标系，mm） ====================
+      # roi.enable=false 时下面的边界不参与过滤。
+      # 启用 ROI 前建议同时确认 X/Y/Z 六个边界；-inf/inf 表示不限制。
+      # - "roi.min_x=-inf"
+      # - "roi.max_x=inf"
+      # - "roi.min_y=-90"
+      # - "roi.max_y=-30"
+      # - "roi.min_z=-inf"
+      # - "roi.max_z=inf"
+
+      # ==================== 法向量 ====================
+      # normal.mode: auto（优先复用，质量不足则重算）/recompute/reuse。
+      # - "normal.reuse_min_valid_ratio=0.995"
+      # - "normal.k_neighbors=20"
+      # - "normal.thread_count=0"
+
+      # ==================== 主焊缝/平面搜索（长度 mm） ====================
+      # - "primary.z_filter_threshold=0.5"
+      # - "primary.y_filter_threshold=2.0"
+      # - "primary.plane_search_leaf_size=1.0"
+      # - "primary.plane_search_min_inliers=300"
+      # - "primary.side_origin_low_quantile=0.002"
+
+      # ==================== 波纹板特征点提取 ====================
+      # 长度/距离参数均为 mm；比例、点积和分位数无量纲。
+      # - "feature.profile_bin_width=0.8"
+      # - "feature.flat_normal_dot_min=0.80"
+      # - "feature.diagonal_normal_dot_min=0.12"
+      # - "feature.bin_label_vote_ratio=0.45"
+      # - "feature.min_segment_bins=3"
+      # - "feature.min_segment_span=1.2"
+      # - "feature.local_fit_half_window_bins=8"
+      # - "feature.local_fit_radius=10.0"
+      # - "feature.local_line_max_median_residual=0.65"
+      # - "feature.flat_profile_slope_max=0.22"
+      # - "feature.flat_segment_max_length=135.0"
+      # - "feature.waist_segment_max_length=70.0"
+      # - "feature.max_hole_bridge=70.0"
+      # - "feature.max_corner_extrapolation=18.0"
+      # - "feature.min_corner_angle_deg=10.0"
+      # - "feature.duplicate_corner_merge_distance=18.0"
+      # - "feature.corner_fit_support_distance=5.0"
+      # - "feature.recessed_chord_search_radius=7.0"
+      # 安全过渡点相对相邻角点的工件 +Y/+Z 生成偏移，不是下方 offset.* 的额外偏移。
+      # - "feature.safe_transition_offset_y=20.0"
+      # - "feature.safe_transition_offset_z=20.0"
+      # - "feature.recessed_arc_search_radius=10.0"
+      # - "feature.bottom_z_quantile=0.10"
+      # - "feature.low_z_xy_tolerance=1.5"
+      # false: 工件 local_y 较小一层是凸角；true: 较大一层是凸角。
+      # - "feature.protruding_is_larger_local_y=false"
+
+      # ==================== 各类焊接点姿态（度） ====================
+      # work_angle_deg 必须在 (0, 90)；lead_angle_deg 绝对值必须 < 85。
+      # left/right 是算法识别的角点类型，不是机器人基坐标方向。
+      # - "orientation.protruding_left.work_angle_deg=45.0"
+      # - "orientation.protruding_right.work_angle_deg=45.0"
+      # - "orientation.recessed_left.work_angle_deg=45.0"
+      # - "orientation.recessed_right.work_angle_deg=45.0"
+      # - "orientation.protruding_left.lead_angle_deg=0.0"
+      # - "orientation.protruding_right.lead_angle_deg=0.0"
+      # - "orientation.recessed_left.lead_angle_deg=0.0"
+      # - "orientation.recessed_right.lead_angle_deg=0.0"
+      # tool_x_reference 可选 workpiece_x 或 corner_bisector（当前已启用 workpiece_x）。
+      # tool_positive_z... 与 tool_x... 两项方向开关已在上方启用，勿在此重复添加。
+
+      # ==================== 分类点位置额外偏移 ====================
+      # 单位 mm，沿算法工件坐标 XYZ 施加：+X=焊接路径，+Y=朝 L 侧，+Z=向上。
+      # 仅取消某一行的注释，就只覆盖该轴；其他轴仍用 SDK 默认值。
+      # - "offset.start_transition.x=0.0"
+      # - "offset.start_transition.y=0.0"
+      # - "offset.start_transition.z=0.0"
+      # - "offset.end_transition.x=0.0"
+      # - "offset.end_transition.y=0.0"
+      # - "offset.end_transition.z=0.0"
+      # - "offset.protruding_left.x=2.5"
+      # - "offset.protruding_left.y=0.0"
+      # - "offset.protruding_left.z=0.0"
+      # - "offset.protruding_right.x=-0.5"
+      # - "offset.protruding_right.y=0.0"
+      # - "offset.protruding_right.z=0.0"
+      # - "offset.recessed_left.x=0.0"
+      # - "offset.recessed_left.y=1.0"
+      # - "offset.recessed_left.z=0.0"
+      # - "offset.recessed_right.x=0.0"
+      # - "offset.recessed_right.y=1.0"
+      # - "offset.recessed_right.z=0.0"
+
+      # ==================== 结果点云可视化（mm） ====================
+      # - "visualization.marker_radius=8.0"
+      # 白色工具轴长度；0 可关闭轴显示。
+      # - "visualization.body_axis_length_mm=25.0"
