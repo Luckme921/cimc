@@ -464,3 +464,109 @@ ros2 topic pub --once /cimc/motor_speed std_msgs/msg/Float32 \
 #
 # data_receiver_node会主动连接192.168.3.5:50000，以JSONL v1双向通信。
 # 3.5直接决定工艺；x86只校验协议并发布现有焊机/电机话题。
+
+# ============================================================
+# 13. ABB 192.168.3.2 双向收发联调（只存储/打印轨迹，禁止运动）
+#     工控机=192.168.3.100，ABB=192.168.3.2，TCP端口=45000
+# ============================================================
+
+# 本节使用 camera_weld_handeye_abb_test.launch.py。
+# 当 handeye_bridge.yaml 中 send_to_abb=true 时，不要使用
+# camera_weld_handeye_test.launch.py；旧测试launch会按安全设计拒绝true。
+# 本ABB联调launch不启动weld_controller_node、motor_control_node，
+# 也不启动任何ABB运动节点。ABB RAPID程序必须只存储和打印轨迹，
+# 不得调用MoveL/MoveJ，不得起弧。
+
+# ------------------------------------------------------------
+# 13.1 ABB端网络和协议准备（由ABB开发人员操作）
+# ------------------------------------------------------------
+# ABB IP/Mask：192.168.3.2/255.255.255.0
+# ABB作为TCP客户端，连接：192.168.3.100:45000
+# ABB发送的每条ASCII指令必须以\n（或\r\n）结尾。
+# 本次只发一条拍照指令：
+# START_CAPTURE:X_mm,Y_mm,Z_mm,QW,QX,QY,QZ\n
+# ABB接收格式：
+# TRAJECTORY_BEGIN:N
+# P1:X_mm,Y_mm,Z_mm,QW,QX,QY,QZ
+# ...
+# PN:X_mm,Y_mm,Z_mm,QW,QX,QY,QZ
+# TRAJECTORY_END
+# ABB必须缓存TCP字节流并按\n分行；收齐N个点后只存储/打印。
+
+# ------------------------------------------------------------
+# 13.2 终端A：启动完整ABB收发联调launch
+# ------------------------------------------------------------
+cd ~/x86_ros2_ws
+source /opt/ros/humble/setup.bash
+source ~/x86_ros2_ws/install/setup.bash
+ros2 launch cimc camera_weld_handeye_abb_test.launch.py
+
+# 等待终端A确认：
+# 1. ABB I/O preflight passed: x86=192.168.3.100:45000, ABB=192.168.3.2
+# 2. Camera ready
+# 3. Weld seam SDK ... ready
+# 4. Hand-eye bridge ready ... send_to_abb=True
+# 5. Coordinator ready
+# 6. ABB连接后显示“成功连接到 ABB 机器人: 192.168.3.2:...”
+# 以上全部就绪前，ABB不要发START_CAPTURE。
+
+# ------------------------------------------------------------
+# 13.3 终端B：核对实际参数、ROS连接和TCP连接
+# ------------------------------------------------------------
+ros2 param get /data_receiver_node listen_host
+ros2 param get /data_receiver_node listen_port
+ros2 param get /data_receiver_node abb_allowed_ip
+ros2 param get /handeye_abb_bridge_node send_to_abb
+
+# 期望：192.168.3.100 / 45000 / 192.168.3.2 / true
+ros2 topic info -v /abb/tx_text
+# 期望：发布者=handeye_abb_bridge_node，订阅者=data_receiver_node。
+
+ss -ltnp | grep ':45000'
+ss -tnp | grep ':45000'
+# 期望：先看到192.168.3.100:45000 LISTEN；ABB连接后再看到ESTAB。
+
+# ------------------------------------------------------------
+# 13.4 可选独立监视终端（launch终端已自动打印这些话题）
+# ------------------------------------------------------------
+# ABB输入的完整ASCII行：
+ros2 topic echo /abb/raw_text
+
+# 解析后的拍照TCP位姿：robot_base，m，ROS四元数x/y/z/w。
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable \
+  /weld_task/capture_tcp_pose_base
+
+# 手眼变换后的轨迹：robot_base，m，ROS四元数x/y/z/w。
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable \
+  /abb/trajectory_tcp
+
+# 准备发给ABB的原始ASCII：mm，四元数qw/qx/qy/qz。
+ros2 topic echo /abb/tx_text
+
+# socket sendall结果；OK只代表工控机已写入TCP，不代表ABB已执行。
+ros2 topic echo /abb/tx_status
+
+# 整体任务和手眼状态：
+ros2 topic echo /weld_task/status
+ros2 topic echo /handeye_bridge/status
+
+# ------------------------------------------------------------
+# 13.5 ABB发送一次真实拍照位姿
+# ------------------------------------------------------------
+# 由ABB开发人员从示教器获取拍照静止时的Base_from_TCP，然后通过
+# 已建立的TCP连接发送一条START_CAPTURE。本节不用ros2 topic pub代替。
+# 必须确认/abb/raw_text与ABB原文完全一致，然后检查：
+# /weld_task/status: capturing -> captured -> extracting -> trajectory_ready -> completed
+# /handeye_bridge/status: success=true, sent_to_abb=true
+# /abb/tx_text: TRAJECTORY_BEGIN:N ... TRAJECTORY_END
+# /abb/tx_status: OK:sent <N> bytes to ABB
+# ABB端：收齐N个P点、打印并与/abb/tx_text逐行对比，禁止运动。
+
+# 如果/abb/tx_status显示ABB is disconnected，该次轨迹已丢弃，不会在重连后补发；
+# 必须先恢复TCP连接，再重新发起一次START_CAPTURE。
+
+# ------------------------------------------------------------
+# 13.6 测试结束
+# ------------------------------------------------------------
+# 终端A按Ctrl+C停止整条联调launch，然后确认无遗留节点。
+ros2 node list

@@ -1,9 +1,11 @@
 data_receiver_node:
   ros__parameters:
     # ABB 机器人作为 TCP 客户端连接本机。
-    listen_host: "192.168.125.2"
+    listen_host: "192.168.3.100"
     listen_port: 45000
-    abb_allowed_ip: "192.168.125.1"
+    abb_allowed_ip: "192.168.3.2"
+    # ABB ASCII 指令必须以 \n（或 \r\n）结尾；用于限制单行长度。
+    abb_max_line_bytes: 4096
 
     # 本机作为 TCP 客户端，主动连接 192.168.3.5 的服务端。
     # 双向数据统一使用《第三方焊接通信协议.md》的 JSONL v1。

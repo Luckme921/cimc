@@ -1,13 +1,16 @@
 import unittest
 
+from geometry_msgs.msg import Pose, PoseArray
 from std_msgs.msg import UInt8MultiArray
 
 from cimc.data_receiver_node import (
     DataReceiverNode,
     decode_protocol_frame,
     encode_protocol_frame,
+    extract_abb_lines,
     extract_jsonl_lines,
 )
+from cimc.handeye_abb_bridge_node import HandeyeAbbBridgeNode
 
 
 class _PublisherRecorder:
@@ -78,6 +81,47 @@ def _request(frame_type, sequence, **fields):
 
 
 class ThirdPartyProtocolTest(unittest.TestCase):
+    def test_abb_trajectory_wire_format(self):
+        bridge = type('BridgeStub', (), {'protocol_precision': 6})()
+        trajectory = PoseArray()
+        pose = Pose()
+        pose.position.x = 1.090441957
+        pose.position.y = -0.272560220
+        pose.position.z = 0.689289440
+        pose.orientation.w = 0.765853257
+        pose.orientation.x = -0.320902583
+        pose.orientation.y = -0.215710919
+        pose.orientation.z = 0.513769519
+        trajectory.poses.append(pose)
+
+        payload = HandeyeAbbBridgeNode._serialize_for_abb(
+            bridge, trajectory)
+
+        self.assertEqual(
+            payload,
+            'TRAJECTORY_BEGIN:1\n'
+            'P1:1090.441957,-272.560220,689.289440,'
+            '0.765853,-0.320903,-0.215711,0.513770\n'
+            'TRAJECTORY_END\n')
+
+    def test_abb_tcp_half_packet_sticky_packet_and_crlf(self):
+        first = (
+            b'START_CAPTURE:947.35,-79.0,717.49,'
+            b'0.38469,-0.77967,0.40899,-0.27723\n')
+        second = b'P1:1000,200,700,1,0,0,0\r\n'
+        receive_buffer = bytearray()
+
+        split = len(first) // 2
+        self.assertEqual(
+            extract_abb_lines(receive_buffer, first[:split], 4096), [])
+        lines = extract_abb_lines(
+            receive_buffer, first[split:] + second, 4096)
+        self.assertEqual(lines, [first.rstrip(b'\n'), second.rstrip(b'\r\n')])
+        self.assertEqual(receive_buffer, bytearray())
+
+        with self.assertRaisesRegex(ValueError, 'maximum line length'):
+            extract_abb_lines(bytearray(), b'x' * 9, 8)
+
     def test_common_frame_round_trip_and_validation(self):
         encoded = _request(
             'setpoints', 2, current_a=250.0, rotation_speed_rps=6.0)

@@ -61,6 +61,24 @@ def extract_jsonl_lines(receive_buffer, received, max_line_bytes):
     return lines
 
 
+def extract_abb_lines(receive_buffer, received, max_line_bytes):
+    """Append one ABB TCP chunk and return complete newline-framed lines."""
+    receive_buffer.extend(received)
+    if len(receive_buffer) > max_line_bytes and b'\n' not in receive_buffer:
+        raise ValueError('ABB command exceeds maximum line length')
+
+    lines = []
+    while b'\n' in receive_buffer:
+        line, _, remainder = receive_buffer.partition(b'\n')
+        receive_buffer[:] = remainder
+        line = line.rstrip(b'\r')
+        if len(line) > max_line_bytes:
+            raise ValueError('ABB command exceeds maximum line length')
+        if line:
+            lines.append(bytes(line))
+    return lines
+
+
 class DataReceiverNode(Node):
     def __init__(self):
         super().__init__('data_receiver_node')
@@ -82,10 +100,12 @@ class DataReceiverNode(Node):
 
         # 1. 网络配置 (ABB 机器人端)。默认值与用户最新版一致。
         self.host = self.declare_parameter(
-            'listen_host', '192.168.125.2').value
+            'listen_host', '192.168.3.100').value
         self.port = int(self.declare_parameter('listen_port', 45000).value)
         self.target_ip = self.declare_parameter(
-            'abb_allowed_ip', '192.168.125.1').value
+            'abb_allowed_ip', '192.168.3.2').value
+        self.abb_max_line_bytes = int(self.declare_parameter(
+            'abb_max_line_bytes', 4096).value)
 
         # 2. TCP 异步可靠转发配置 (发给第三方设备)
         self.forward_ip = self.declare_parameter(
@@ -124,6 +144,8 @@ class DataReceiverNode(Node):
             raise ValueError('listen/ABB/forward IP parameters must be non-empty')
         if not 1 <= self.port <= 65535 or not 1 <= self.forward_port <= 65535:
             raise ValueError('TCP ports must be within [1, 65535]')
+        if self.abb_max_line_bytes <= 0:
+            raise ValueError('abb_max_line_bytes must be > 0')
         if self.forward_queue_size <= 0 or not self.weld_feedback_topic:
             raise ValueError(
                 'forward_queue_size must be > 0 and weld_feedback_topic must be non-empty')
@@ -459,6 +481,7 @@ class DataReceiverNode(Node):
                         self.get_logger().info(f"🚀 成功连接到 ABB 机器人: {client_ip}:{addr[1]}")
                         conn.settimeout(1.0)
                         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        receive_buffer = bytearray()
                         with self.abb_connection_lock:
                             self.abb_connection = conn
 
@@ -477,9 +500,20 @@ class DataReceiverNode(Node):
                                         'ascii', errors='replace'),
                                     raw_hex=data.hex().upper())
 
-                                # 轨道2：解码为字符串，交给 ROS 节点内部处理
-                                text_data = data.decode('ascii', errors='ignore')
-                                self.process_received_text(text_data)
+                                # 轨道2：ABB 文本协议以换行符分帧。TCP 没有消息
+                                # 边界，必须缓存半包并拆分粘包后再发布 ROS 消息。
+                                try:
+                                    abb_lines = extract_abb_lines(
+                                        receive_buffer, data,
+                                        self.abb_max_line_bytes)
+                                except ValueError as exc:
+                                    self.get_logger().error(str(exc))
+                                    receive_buffer.clear()
+                                    continue
+                                for line in abb_lines:
+                                    text_data = line.decode(
+                                        'ascii', errors='ignore')
+                                    self.process_received_text(text_data)
 
                             except socket.timeout:
                                 continue

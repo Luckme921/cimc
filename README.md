@@ -8,6 +8,8 @@
 
 本版本提供阶段性的 `camera_weld_handeye_test.launch.py`，只启动相机、焊缝感知、手眼桥和任务协调节点。它不是生产 launch，不启动 ABB TCP、焊机、焊接逻辑或电机节点，且强制 `send_to_abb=false`。
 
+2026-09-17 新增 `camera_weld_handeye_abb_test.launch.py`，用于工控机 `192.168.3.100:45000` 与 ABB `192.168.3.2` 双向联调。该 launch 要求 `send_to_abb=true`，但仍不启动机器人运动、焊机或电机节点；ABB 程序当前只允许存储和打印轨迹。
+
 ## 1. 最终目录和保留内容
 
 ```text
@@ -70,7 +72,7 @@ flowchart LR
 | 焊缝 SDK 2.2.1 与 ROS 进程内调用 | 现场新拍 PLY 已成功生成 6 个焊点和 2 个过渡点；ROS 已链接安装目录中的 2.2.1 |
 | 焊缝关键点与相机系姿态 | Tool X 可选工件 `+X/-X` 或旧角平分线；5 组 PLY 离线回归保持 XYZ/分类/Tool Z 不变，真实姿态待验证 |
 | 任务协调与手眼桥接 | 完整链路已输出 8 个基坐标位姿，XYZ 初步现场对齐；需重建 TCP、重做手眼后再验证姿态与可达性 |
-| ABB 自动接收/发送 | 保留接口；本轮无机械臂通信测试不启动 |
+| ABB 自动接收/发送 | 已增加 `.3.100:45000 <- .3.2` 双向联调 launch、换行分帧与轨迹文本输出；真实 ABB 收发待现场验证 |
 | 焊机与旋弧电机远程执行 | JSONL v1 和直接话题映射已实现；一元模式为默认，真实焊机/电机及 192.168.3.5 待联调 |
 | 旧固定点号工艺逻辑 | 不再作为当前架构的大脑；仅保留源码，不编译、不安装 |
 
@@ -231,6 +233,14 @@ ros2 launch cimc camera_weld_handeye_test.launch.py
 
 launch 同时启动相机、焊缝提取、手眼桥和任务协调节点，并在同一终端打印任务/算法/手眼状态以及下一条完整的 `/abb/trajectory_tcp`。节点就绪后，仍需另开终端人工发布一次 `START_CAPTURE`。
 
+ABB 双向收发联调（ABB 只存储/打印，禁止运动）使用：
+
+```bash
+ros2 launch cimc camera_weld_handeye_abb_test.launch.py
+```
+
+完整执行顺序和监视话题见 `order.txt` 第 13 节。
+
 这个 launch 直接读取主工作区中的以下文件，修改 YAML 参数后下次启动立即生效：
 
 ```text
@@ -254,17 +264,20 @@ ros2 topic pub --once /cimc/motor_speed std_msgs/msg/Float32 "{data: 0.0}"
 ### 10.2 ABB 数据节点
 
 ```bash
-ros2 run cimc data_receiver_node
+ros2 run cimc data_receiver_node --ros-args \
+  --params-file ~/x86_ros2_ws/src/cimc/config/data_receiver.yaml
 ros2 topic echo /abb/raw_text
 ros2 topic echo /abb/weld_point
+ros2 topic echo /abb/tx_text
+ros2 topic echo /abb/tx_status
 ```
 
 新工控机 IP 若不同，可命令行覆盖，不改源码：
 
 ```bash
 ros2 run cimc data_receiver_node --ros-args \
-  -p listen_host:=192.168.125.2 \
-  -p abb_allowed_ip:=192.168.125.1 \
+  -p listen_host:=192.168.3.100 \
+  -p abb_allowed_ip:=192.168.3.2 \
   -p forward_ip:=192.168.3.5
 ```
 

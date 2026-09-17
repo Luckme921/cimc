@@ -19,7 +19,7 @@ weld_seam_node:
     # 5. config_file 非空时先读外部 .conf，algorithm_overrides 再覆盖同名项。
     algorithm_overrides:
       # ==================== 当前现场已启用值 ====================
-      - "roi.enable=false"
+      - "roi.enable=true"
       - "normal.mode=auto"
       - "orientation.tool_positive_z_points_from_tcp_to_body=false"
       # Tool +X 参考固定工件焊接前进轴，减少不同角点间绕焊枪轴滚转。
@@ -28,14 +28,14 @@ weld_seam_node:
       - "orientation.tool_x_points_along_positive_workpiece_x=false"
 
       # ==================== ROI（相机/PLY 坐标系，mm） ====================
-      # roi.enable=false 时下面的边界不参与过滤。
+      # roi.enable=true 时下面的边界参与过滤。
       # 启用 ROI 前建议同时确认 X/Y/Z 六个边界；-inf/inf 表示不限制。
-      # - "roi.min_x=-inf"
-      # - "roi.max_x=inf"
-      # - "roi.min_y=-90"
-      # - "roi.max_y=-30"
-      # - "roi.min_z=-inf"
-      # - "roi.max_z=inf"
+      - "roi.min_x=-190"
+      - "roi.max_x=200"
+      - "roi.min_y=-inf"
+      - "roi.max_y=inf"
+      - "roi.min_z=400"
+      - "roi.max_z=550"
 
       # ==================== 法向量 ====================
       # normal.mode: auto（优先复用，质量不足则重算）/recompute/reuse。

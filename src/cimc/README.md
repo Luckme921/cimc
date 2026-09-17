@@ -71,7 +71,7 @@ sudo usermod -aG dialout "$USER"
 网络流向：
 
 ```text
-ABB 192.168.125.1 -> 本机 192.168.125.2:45000 -> ROS 话题
+ABB 192.168.3.2 -> 本机 192.168.3.100:45000 -> ROS 话题
                                            \-> JSONL abb_rx ----\
 /weld/feedback_raw -> JSONL weld_feedback -----------------------> 192.168.3.5:50000
 /weld/control、/weld/set_param_real、/cimc/motor_speed <--- JSONL command/setpoints
@@ -81,6 +81,8 @@ ABB 192.168.125.1 -> 本机 192.168.125.2:45000 -> ROS 话题
 
 - 发布 `/abb/raw_text`，`std_msgs/msg/String`：ABB 原始 ASCII 文本；
 - 发布 `/abb/weld_point`，`geometry_msgs/msg/Point`：解析 `P...:x,y,z,...` 的前三个坐标；
+- 订阅 `/abb/tx_text`，`std_msgs/msg/String`：通过已建立的 ABB socket 发送轨迹；
+- 发布 `/abb/tx_status`，`std_msgs/msg/String`：报告 `sendall()` 成功字节数或断线/队列错误；
 - 订阅 `/weld/feedback_raw`，`std_msgs/msg/UInt8MultiArray`：把每个 6 字节 TPDO1 解析并封装为 `weld_feedback` JSONL 帧；
 - 发布 `/weld/control` 和 `/weld/set_param_real`：把第三方动作/电流请求直接交给现有焊机驱动；
 - 发布 `/cimc/motor_speed`：把第三方旋转速度直接交给现有电机节点；
@@ -90,9 +92,10 @@ ABB 192.168.125.1 -> 本机 192.168.125.2:45000 -> ROS 话题
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
-| `listen_host` | `192.168.125.2` | 本机绑定地址，必须实际配置在某网卡上 |
+| `listen_host` | `192.168.3.100` | 本机绑定地址，必须实际配置在某网卡上 |
 | `listen_port` | `45000` | ABB 连接的 TCP 监听端口 |
-| `abb_allowed_ip` | `192.168.125.1` | 只允许该 ABB 来源 IP |
+| `abb_allowed_ip` | `192.168.3.2` | 只允许该 ABB 来源 IP |
+| `abb_max_line_bytes` | `4096` | ABB 换行分帧 ASCII 单行最大字节数 |
 | `forward_ip` | `192.168.3.5` | 第三方控制设备地址 |
 | `forward_port` | `50000` | 第三方 TCP 服务端口 |
 | `forward_queue_size` | `500` | 非阻塞转发队列容量 |
@@ -104,7 +107,7 @@ ABB 192.168.125.1 -> 本机 192.168.125.2:45000 -> ROS 话题
 | `min_rotation_speed_rps/max_rotation_speed_rps` | `0.0/6.0` | 网络转速软限制；当前上限取历史工艺值 |
 | `stop_on_third_party_disconnect` | `true` | 起焊后第三方断线时停焊并停电机 |
 
-ABB 接收线程不等待第三方发送成功；第三方断线时后台线程重连，所以不会阻塞 ABB 接收。重连时会丢弃断线期间的旧实时帧，避免第三方把历史反馈误认为当前状态。队列满时丢弃新反馈，不让内存无限增长。
+ABB 输入要求每条 ASCII 命令以 `\n`（或 `\r\n`）结尾；节点会缓存 TCP 半包、拆分粘包，然后把每个完整行发布到 `/abb/raw_text`。ABB 接收线程不等待第三方发送成功；第三方断线时后台线程重连，所以不会阻塞 ABB 接收。重连时会丢弃断线期间的旧实时帧，避免第三方把历史反馈误认为当前状态。队列满时丢弃新反馈，不让内存无限增长。
 
 运行和改 IP：
 
@@ -142,3 +145,11 @@ ros2 launch cimc camera_weld_handeye_test.launch.py
 ```
 
 该 launch 不启动 `data_receiver_node`、`weld_controller_node` 或 `motor_control_node`；历史 `weld_logic_node` 已不再构建。它只指定主工作区 `src` 内的四个 ROS 参数 YAML，不在 launch 里覆盖参数值。手眼配置必须显式保持 `send_to_abb: false`，否则测试 launch 会在启动节点前拒绝运行。
+
+ABB 双向收发联调使用：
+
+```bash
+ros2 launch cimc camera_weld_handeye_abb_test.launch.py
+```
+
+该 launch 另外启动 `data_receiver_node`，要求 `send_to_abb: true`，并打印 `/abb/raw_text`、`/abb/trajectory_tcp`、`/abb/tx_text` 和 `/abb/tx_status`。它仍不启动机器人运动、焊机或电机节点，ABB 端当前只允许存储/打印收到的点。

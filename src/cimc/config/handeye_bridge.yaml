@@ -8,6 +8,7 @@ handeye_abb_bridge_node:
     output_frame_id: "robot_base"
     require_capture_pose: true
     require_task_armed: true
-    # 当前只验证计算结果；这个测试 launch 会拒绝 true。
-    send_to_abb: false
+    # ABB联调launch要求true；原安全测试launch仍会拒绝true。
+    # ABB端当前只允许存储/打印轨迹，禁止执行运动。
+    send_to_abb: true
     protocol_precision: 6

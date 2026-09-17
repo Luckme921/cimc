@@ -28,7 +28,7 @@ ABB --TCP--> data_receiver_node --/abb/raw_text--> weld_task_coordinator_node
 
 ## 2. 为什么不让新节点直接连 ABB
 
-ABB 是 TCP 客户端，`data_receiver_node` 是 `192.168.125.2:45000` 服务端。ABB 已经和该节点建立了一条全双工 TCP 连接。另一个节点无法再次绑定同一 IP/端口，也无法直接取得另一进程里的 socket。
+ABB 是 `192.168.3.2` TCP 客户端，`data_receiver_node` 是工控机 `192.168.3.100:45000` 服务端。ABB 与该节点建立一条全双工 TCP 连接。另一个节点无法再次绑定同一 IP/端口，也无法直接取得另一进程里的 socket。ABB 发送的每条 ASCII 命令必须以 `\n`（或 `\r\n`）结尾。
 
 因此桥接节点发布 `/abb/tx_text`，由 `data_receiver_node` 通过原来的 socket 发送。新增 `/abb/tx_status` 报告成功字节数或断线/队列错误。断线时数据会丢弃，不在下次连接时补发旧轨迹。
 
@@ -115,7 +115,7 @@ TCP 可能粘包或拆包，ABB RAPID 必须按 `\n` 累积并解析完整行，
 T_base_tool = T_base_tcp_at_capture * T_tcp_camera * T_camera_tool
 ```
 
-在没有确认标定矩阵方向和 ABB 目标坐标系前，必须保持 `send_to_abb=false`做离线验证；这也是代码默认值。
+在没有确认标定矩阵方向和 ABB 目标坐标系前，必须保持 `send_to_abb=false`做离线验证；代码默认值仍为 `false`。当前 ABB 收发联调配置为 `true`，ABB 端只允许存储/打印轨迹，禁止运动。
 
 ## 6. 构建
 
@@ -156,6 +156,14 @@ ros2 launch cimc camera_weld_handeye_test.launch.py
 该 launch 只启动 `chishine_camera_node`、`weld_seam_node`、`handeye_abb_bridge_node` 和 `weld_task_coordinator_node`，并在 launch 终端监视三个状态话题、等待打印下一条新的 `/abb/trajectory_tcp`。它不启动 ABB TCP、焊机、焊接逻辑或电机节点。
 
 launch 不覆盖节点参数：手眼桥参数在 `config/handeye_bridge.yaml`，协调器参数在 `config/weld_task_coordinator.yaml`，相机与焊缝节点仍分别读取各自包内的 YAML。测试 launch 会先检查 `handeye_bridge.yaml` 中的 `send_to_abb` 必须为 `false`，但不会暗中覆盖它。
+
+ABB 收发联调使用：
+
+```bash
+ros2 launch cimc camera_weld_handeye_abb_test.launch.py
+```
+
+该 launch 要求 `send_to_abb=true`，增加 `data_receiver_node`，并自动打印 ABB 收发话题。它不启动机器人运动、焊机或电机节点。现场顺序见根目录 `order.txt` 第 13 节。
 
 下列分节点命令保留作为故障隔离手段。
 
