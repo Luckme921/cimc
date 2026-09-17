@@ -516,9 +516,10 @@ ros2 launch cimc camera_weld_handeye_abb_test.launch.py
 ros2 param get /data_receiver_node listen_host
 ros2 param get /data_receiver_node listen_port
 ros2 param get /data_receiver_node abb_allowed_ip
+ros2 param get /data_receiver_node abb_capture_command
 ros2 param get /handeye_abb_bridge_node send_to_abb
 
-# 期望：192.168.3.100 / 45000 / 192.168.3.2 / true
+# 期望：192.168.3.100 / 45000 / 192.168.3.2 / START_CAPTURE / true
 ros2 topic info -v /abb/tx_text
 # 期望：发布者=handeye_abb_bridge_node，订阅者=data_receiver_node。
 
@@ -546,6 +547,10 @@ ros2 topic echo /abb/tx_text
 # socket sendall结果；OK只代表工控机已写入TCP，不代表ABB已执行。
 ros2 topic echo /abb/tx_status
 
+# 端到端耗时：ABB START_CAPTURE完整收到 -> 轨迹sendall返回。
+# 单位ms；同时给出当前进程内的成功次数、平均/最小/最大值。
+ros2 topic echo /abb/task_timing
+
 # 整体任务和手眼状态：
 ros2 topic echo /weld_task/status
 ros2 topic echo /handeye_bridge/status
@@ -559,8 +564,14 @@ ros2 topic echo /handeye_bridge/status
 # /weld_task/status: capturing -> captured -> extracting -> trajectory_ready -> completed
 # /handeye_bridge/status: success=true, sent_to_abb=true
 # /abb/tx_text: TRAJECTORY_BEGIN:N ... TRAJECTORY_END
-# /abb/tx_status: OK:sent <N> bytes to ABB
+# /abb/tx_status: OK:sent <N> bytes to ABB; task_elapsed_ms=<耗时>
+# /abb/task_timing: success=true，elapsed_ms为本次端到端耗时，
+#                   average_ms/minimum_ms/maximum_ms为当前进程内统计。
+# launch终端还会每次打印：[ABB端到端耗时] ... 本次=xxx ms ...
 # ABB端：收齐N个P点、打印并与/abb/tx_text逐行对比，禁止运动。
+
+# 注意：该耗时终点是工控机socket sendall()成功返回，不包含ABB程序
+# 解析/存储时间，也不代表ABB已执行轨迹。本次不要求ABB回复ACK。
 
 # 如果/abb/tx_status显示ABB is disconnected，该次轨迹已丢弃，不会在重连后补发；
 # 必须先恢复TCP连接，再重新发起一次START_CAPTURE。

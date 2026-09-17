@@ -32,6 +32,8 @@ ABB 是 `192.168.3.2` TCP 客户端，`data_receiver_node` 是工控机 `192.168
 
 因此桥接节点发布 `/abb/tx_text`，由 `data_receiver_node` 通过原来的 socket 发送。新增 `/abb/tx_status` 报告成功字节数或断线/队列错误。断线时数据会丢弃，不在下次连接时补发旧轨迹。
 
+`data_receiver_node` 从完整 `START_CAPTURE` 行收到时开始计时，到轨迹 socket `sendall()` 返回时结束，在终端打印本次与平均/最小/最大耗时，并发布 `/abb/task_timing` JSON。这个边界不包含 ABB 程序解析和存储时间。
+
 ## 3. weld_task_coordinator_node
 
 订阅：

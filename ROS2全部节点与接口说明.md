@@ -44,11 +44,12 @@ weld_controller_node
 
 ### 2.1 当前功能
 
-- 在 x86 工控机上建立 TCP 服务端，默认监听 192.168.125.2:45000。
-- 只接受默认 ABB 地址 192.168.125.1 的连接。
+- 在 x86 工控机上建立 TCP 服务端，默认监听 192.168.3.100:45000。
+- 只接受默认 ABB 地址 192.168.3.2 的连接。
 - 接收 ABB 原始 ASCII 文本并发布到 ROS 2。
 - 解析 P...:x,y,z,... 格式，发布前三个坐标。
 - 接收 /abb/tx_text，通过同一条 ABB TCP 连接发送回机器人。
+- 统计收到 `START_CAPTURE` 到轨迹 `sendall()` 返回的端到端耗时。
 - 把 ABB 数据和焊机 RX 六字节反馈封装成 JSONL v1 发给第三方。
 - 从同一 TCP 连接接收第三方动作/实时设定值，校验后直接发布现有焊机和电机话题。
 - 处理 JSONL 半包/粘包、递增序号、ACK、数值软限制和起焊后断线停机。
@@ -57,9 +58,11 @@ weld_controller_node
 
 | 参数 | 默认值 | 含义 |
 |---|---:|---|
-| listen_host | 192.168.125.2 | 本机ABB通信网卡地址 |
+| listen_host | 192.168.3.100 | 本机ABB通信网卡地址 |
 | listen_port | 45000 | TCP监听端口 |
-| abb_allowed_ip | 192.168.125.1 | 允许连接的ABB地址 |
+| abb_allowed_ip | 192.168.3.2 | 允许连接的ABB地址 |
+| abb_max_line_bytes | 4096 | ABB ASCII单行最大字节数 |
+| abb_capture_command | START_CAPTURE | 启动端到端计时的命令前缀 |
 | forward_ip | 192.168.3.5 | 第三方控制设备地址 |
 | forward_port | 50000 | 第三方TCP端口 |
 | forward_queue_size | 500 | 第三方转发队列容量 |
@@ -79,6 +82,8 @@ weld_controller_node
 | 发布 | /abb/weld_point | geometry_msgs/msg/Point | 从 P... 文本提取的XYZ |
 | 订阅 | /abb/tx_text | std_msgs/msg/String | 等待发给ABB的ASCII文本 |
 | 发布 | /abb/tx_status | std_msgs/msg/String | OK或ERROR发送状态 |
+| 发布 | /abb/task_timing | std_msgs/msg/String | 端到端耗时JSON及平均/最小/最大统计 |
+| 订阅 | /weld_task/status | std_msgs/msg/String | 关联task_id并识别流程故障 |
 | 订阅 | /weld/feedback_raw | std_msgs/msg/UInt8MultiArray | 将焊机RX六字节封装为反馈JSONL |
 | 发布 | /weld/control | std_msgs/msg/String | 第三方动作映射后的焊机命令 |
 | 发布 | /weld/set_param_real | std_msgs/msg/Float32MultiArray | 第三方电流和一元模式占位电压 |
@@ -110,7 +115,8 @@ ros2 topic pub --once /abb/tx_text std_msgs/msg/String \
 - OK 只表示 socket.sendall() 成功，不代表 ABB 已解析或执行。
 - ABB 未连接时，当前待发消息会丢弃，避免重连后误发旧轨迹。
 - 第三方 ACK 只表示 ROS 话题已发布，不代表焊机或电机物理执行成功。
-- ABB 入站文本的业务解析仍按现有接收块处理；第三方 JSONL 通道已独立处理半包和粘包。
+- ABB 入站文本与第三方 JSONL 通道都已独立处理 TCP 半包和粘包。
+- `/abb/task_timing` 的结束点是工控机 `sendall()` 返回，不包含 ABB 解析/存储时间。
 - 完整双向报文定义见 `第三方焊接通信协议.md`。
 
 ---

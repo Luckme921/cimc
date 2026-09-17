@@ -270,7 +270,10 @@ ros2 topic echo /abb/raw_text
 ros2 topic echo /abb/weld_point
 ros2 topic echo /abb/tx_text
 ros2 topic echo /abb/tx_status
+ros2 topic echo /abb/task_timing
 ```
+
+`/abb/task_timing` 统计完整 `START_CAPTURE` 到轨迹 socket `sendall()` 返回的端到端耗时（ms），并提供当前进程内的成功样本数、平均值、最小值和最大值。它不包含 ABB 程序解析/存储时间。
 
 新工控机 IP 若不同，可命令行覆盖，不改源码：
 

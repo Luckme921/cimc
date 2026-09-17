@@ -4,6 +4,7 @@ from geometry_msgs.msg import Pose, PoseArray
 from std_msgs.msg import UInt8MultiArray
 
 from cimc.data_receiver_node import (
+    AbbTaskTimer,
     DataReceiverNode,
     decode_protocol_frame,
     encode_protocol_frame,
@@ -81,6 +82,34 @@ def _request(frame_type, sequence, **fields):
 
 
 class ThirdPartyProtocolTest(unittest.TestCase):
+    def test_abb_task_timer_statistics_and_duplicate_start(self):
+        timer = AbbTaskTimer()
+
+        first = timer.start(1_000_000_000)
+        self.assertEqual(first['sequence'], 1)
+        self.assertIsNone(timer.start(1_100_000_000))
+        timer.set_task_id(7)
+        result = timer.finish(1_250_000_000, True)
+        self.assertEqual(result['task_id'], 7)
+        self.assertEqual(result['elapsed_ms'], 250.0)
+        self.assertEqual(result['success_count'], 1)
+        self.assertEqual(result['average_ms'], 250.0)
+        self.assertEqual(result['minimum_ms'], 250.0)
+        self.assertEqual(result['maximum_ms'], 250.0)
+
+        timer.start(2_000_000_000)
+        failed = timer.finish(2_500_000_000, False)
+        self.assertEqual(failed['elapsed_ms'], 500.0)
+        self.assertEqual(failed['success_count'], 1)
+
+        timer.start(3_000_000_000)
+        result = timer.finish(3_750_000_000, True)
+        self.assertEqual(result['success_count'], 2)
+        self.assertEqual(result['average_ms'], 500.0)
+        self.assertEqual(result['minimum_ms'], 250.0)
+        self.assertEqual(result['maximum_ms'], 750.0)
+        self.assertIsNone(timer.finish(4_000_000_000, True))
+
     def test_abb_trajectory_wire_format(self):
         bridge = type('BridgeStub', (), {'protocol_precision': 6})()
         trajectory = PoseArray()

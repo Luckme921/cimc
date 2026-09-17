@@ -6,6 +6,8 @@ data_receiver_node:
     abb_allowed_ip: "192.168.3.2"
     # ABB ASCII 指令必须以 \n（或 \r\n）结尾；用于限制单行长度。
     abb_max_line_bytes: 4096
+    # 用于启动“收到拍照指令 -> 轨迹sendall完成”端到端计时。
+    abb_capture_command: "START_CAPTURE"
 
     # 本机作为 TCP 客户端，主动连接 192.168.3.5 的服务端。
     # 双向数据统一使用《第三方焊接通信协议.md》的 JSONL v1。

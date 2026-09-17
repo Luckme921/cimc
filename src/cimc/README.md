@@ -83,6 +83,8 @@ ABB 192.168.3.2 -> 本机 192.168.3.100:45000 -> ROS 话题
 - 发布 `/abb/weld_point`，`geometry_msgs/msg/Point`：解析 `P...:x,y,z,...` 的前三个坐标；
 - 订阅 `/abb/tx_text`，`std_msgs/msg/String`：通过已建立的 ABB socket 发送轨迹；
 - 发布 `/abb/tx_status`，`std_msgs/msg/String`：报告 `sendall()` 成功字节数或断线/队列错误；
+- 发布 `/abb/task_timing`，`std_msgs/msg/String` JSON：报告 `START_CAPTURE` 收到至轨迹 `sendall()` 完成的耗时及进程内统计；
+- 订阅 `/weld_task/status`：绑定协调器 `task_id`，并在任务故障时结束失败计时；
 - 订阅 `/weld/feedback_raw`，`std_msgs/msg/UInt8MultiArray`：把每个 6 字节 TPDO1 解析并封装为 `weld_feedback` JSONL 帧；
 - 发布 `/weld/control` 和 `/weld/set_param_real`：把第三方动作/电流请求直接交给现有焊机驱动；
 - 发布 `/cimc/motor_speed`：把第三方旋转速度直接交给现有电机节点；
@@ -96,6 +98,7 @@ ABB 192.168.3.2 -> 本机 192.168.3.100:45000 -> ROS 话题
 | `listen_port` | `45000` | ABB 连接的 TCP 监听端口 |
 | `abb_allowed_ip` | `192.168.3.2` | 只允许该 ABB 来源 IP |
 | `abb_max_line_bytes` | `4096` | ABB 换行分帧 ASCII 单行最大字节数 |
+| `abb_capture_command` | `START_CAPTURE` | 启动 ABB 端到端计时的命令前缀，必须与协调器 `start_command` 一致 |
 | `forward_ip` | `192.168.3.5` | 第三方控制设备地址 |
 | `forward_port` | `50000` | 第三方 TCP 服务端口 |
 | `forward_queue_size` | `500` | 非阻塞转发队列容量 |
@@ -108,6 +111,8 @@ ABB 192.168.3.2 -> 本机 192.168.3.100:45000 -> ROS 话题
 | `stop_on_third_party_disconnect` | `true` | 起焊后第三方断线时停焊并停电机 |
 
 ABB 输入要求每条 ASCII 命令以 `\n`（或 `\r\n`）结尾；节点会缓存 TCP 半包、拆分粘包，然后把每个完整行发布到 `/abb/raw_text`。ABB 接收线程不等待第三方发送成功；第三方断线时后台线程重连，所以不会阻塞 ABB 接收。重连时会丢弃断线期间的旧实时帧，避免第三方把历史反馈误认为当前状态。队列满时丢弃新反馈，不让内存无限增长。
+
+ABB 端到端计时使用 `time.perf_counter_ns()`：开始于完整 `START_CAPTURE` 行收到，结束于完整轨迹的 socket `sendall()` 返回。每次成功或失败都在节点终端打印，并发布 `/abb/task_timing`。成功样本同时统计平均/最小/最大耗时；该耗时不包含 ABB 程序的解析和存储时间。
 
 运行和改 IP：
 
@@ -152,4 +157,4 @@ ABB 双向收发联调使用：
 ros2 launch cimc camera_weld_handeye_abb_test.launch.py
 ```
 
-该 launch 另外启动 `data_receiver_node`，要求 `send_to_abb: true`，并打印 `/abb/raw_text`、`/abb/trajectory_tcp`、`/abb/tx_text` 和 `/abb/tx_status`。它仍不启动机器人运动、焊机或电机节点，ABB 端当前只允许存储/打印收到的点。
+该 launch 另外启动 `data_receiver_node`，要求 `send_to_abb: true`，并打印 `/abb/raw_text`、`/abb/trajectory_tcp`、`/abb/tx_text`、`/abb/tx_status` 和 `/abb/task_timing`。它仍不启动机器人运动、焊机或电机节点，ABB 端当前只允许存储/打印收到的点。

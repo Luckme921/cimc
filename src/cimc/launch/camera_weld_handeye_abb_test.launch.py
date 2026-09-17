@@ -38,9 +38,15 @@ def _validate_abb_test_configuration(context, *config_substitutions):
 
     receiver_params = _load_parameters(
         config_paths[4], 'data_receiver_node')
+    coordinator_params = _load_parameters(
+        config_paths[3], 'weld_task_coordinator_node')
     listen_host = str(receiver_params.get('listen_host', '')).strip()
     allowed_ip = str(receiver_params.get('abb_allowed_ip', '')).strip()
     listen_port = receiver_params.get('listen_port')
+    receiver_command = str(
+        receiver_params.get('abb_capture_command', '')).strip()
+    coordinator_command = str(
+        coordinator_params.get('start_command', '')).strip()
     if not listen_host or not allowed_ip or listen_port is None:
         raise RuntimeError(
             'data_receiver.yaml must define listen_host, listen_port and '
@@ -48,6 +54,10 @@ def _validate_abb_test_configuration(context, *config_substitutions):
     if listen_host == allowed_ip:
         raise RuntimeError(
             'listen_host is the x86 address and must differ from abb_allowed_ip.')
+    if not receiver_command or receiver_command != coordinator_command:
+        raise RuntimeError(
+            'data_receiver abb_capture_command must equal coordinator '
+            'start_command.')
 
     return [LogInfo(msg=[
         'ABB I/O preflight passed: x86=', listen_host, ':',
@@ -186,6 +196,11 @@ def generate_launch_description():
             cmd=['ros2', 'topic', 'echo', '/abb/tx_status',
                  'std_msgs/msg/String'],
             name='abb_tx_status_echo', output='screen',
+            condition=IfCondition(echo_abb_io)),
+        ExecuteProcess(
+            cmd=['ros2', 'topic', 'echo', '/abb/task_timing',
+                 'std_msgs/msg/String'],
+            name='abb_task_timing_echo', output='screen',
             condition=IfCondition(echo_abb_io)),
         ExecuteProcess(
             cmd=[
