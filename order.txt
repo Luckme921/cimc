@@ -120,7 +120,10 @@ cd ~/x86_ros2_ws/x86_chishine_live_viewer
   --max-display-points 600000 \
   --save-dir /home/mini/scut_weld_data/pointclouds
 
-# 窗口操作：鼠标调整视角；S保存当前完整PLY；Q/Esc退出。
+# 窗口ROI操作（相机/PLY坐标系，单位mm）：
+# B=按当前完整点云初始化并开启ROI；T=开关ROI；D=清空ROI；K=打印可复制到weld_seam.yaml的参数。
+# X/Y/Z=选轴；N/M=选MIN/MAX；[ / ]=数值减小/增大；, / .=步长减半/加倍。
+# MIN增大、MAX减小会收紧范围；S保存ROI内全部点和法向量；ROI关闭时S保存完整PLY；Q/Esc退出。
 # 查看器与当前ROS相机YAML的深度范围均为100～600 mm。
 # 选好机械臂静止拍照位置后，先记录示教器当前TCP，再按Q/Esc或Ctrl+C关闭查看器。
 # 从选定位置到第9.7节触发本次唯一一次任务拍照期间，机械臂必须保持不动。
@@ -330,7 +333,10 @@ cd ~/x86_ros2_ws/x86_chishine_live_viewer
   --max-display-points 600000 \
   --save-dir /home/mini/scut_weld_data/pointclouds
 
-# 取景满意后按 S 保存，记住终端打印的 Saved snapshot 绝对路径。
+# 默认ROI关闭并显示完整点云。按B初始化ROI，再用：
+# X/Y/Z选轴，N/M选MIN/MAX，[ / ]减小/增大数值，, / .减小/增大步长。
+# T开关ROI，D清空ROI，K打印可直接复制进weld_seam.yaml的六个roi.*参数。
+# 调整满意后按S保存ROI内的全部点和法向量，记住终端打印的Saved snapshot绝对路径。
 # 文件名形如：live_20260910_173000_123.ply。
 # 保存后按 Q/Esc 退出窗口；必须先释放相机，再继续下面步骤。
 pgrep -af chishine_live_viewer

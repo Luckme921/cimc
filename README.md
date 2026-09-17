@@ -410,7 +410,7 @@ ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
 
 相机固定在机械臂末端，但本轮不连接 ABB TCP、不让程序控制机械臂。完整命令已按终端和顺序写入 `order.txt`，总体流程为：
 
-1. 启动 `x86_chishine_live_viewer`，用实时点云选择合适的静止拍照位置；可按 `S` 保存参考 PLY。查看器和当前 ROS 相机 YAML 的深度范围统一为 `100–600 mm`。
+1. 启动 `x86_chishine_live_viewer`，用实时点云选择合适的静止拍照位置；默认显示完整点云，可按 `B` 初始化相机/PLY坐标系 XYZ ROI，实时调整后按 `K` 打印可复制到 `weld_seam.yaml` 的六个边界，按 `S` 保存 ROI 内完整点云。查看器和当前 ROS 相机 YAML 的深度范围统一为 `100–600 mm`。
 2. 按 `Q`、`Esc` 或 `Ctrl+C` 完全关闭查看器，释放相机独占连接。
 3. 启动 ROS 相机节点；它连接相机并等待软件触发，此时不主动生成 PLY。
 4. 启动焊缝节点并确认 `auto_process=true`；它等待新的 PLY 路径。

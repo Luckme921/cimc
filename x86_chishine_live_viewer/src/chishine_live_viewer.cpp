@@ -31,6 +31,31 @@ namespace {
 std::atomic_bool g_stop_requested{false};
 std::atomic_bool g_save_requested{false};
 
+struct RoiBounds {
+    bool enabled = false;
+    bool initialized = false;
+    float min_x = -std::numeric_limits<float>::infinity();
+    float max_x = std::numeric_limits<float>::infinity();
+    float min_y = -std::numeric_limits<float>::infinity();
+    float max_y = std::numeric_limits<float>::infinity();
+    float min_z = -std::numeric_limits<float>::infinity();
+    float max_z = std::numeric_limits<float>::infinity();
+};
+
+enum class RoiAxis { X, Y, Z };
+enum class RoiLimit { Minimum, Maximum };
+
+struct RoiControls {
+    RoiBounds bounds;
+    RoiAxis selected_axis = RoiAxis::X;
+    RoiLimit selected_limit = RoiLimit::Minimum;
+    float step_mm = 5.0f;
+    bool fit_requested = false;
+    bool print_requested = false;
+    int pending_adjustment = 0;
+    std::size_t revision = 0;
+};
+
 struct Options {
     bool network = true;
     bool usb = false;
@@ -53,6 +78,11 @@ struct Options {
     float gain = std::numeric_limits<float>::quiet_NaN();
     float exposure = std::numeric_limits<float>::quiet_NaN();
     float frame_time = std::numeric_limits<float>::quiet_NaN();
+
+    RoiBounds roi;
+    bool roi_enable_explicit = false;
+    bool roi_bound_provided = false;
+    float roi_step_mm = 5.0f;
 };
 
 std::string help()
@@ -77,8 +107,16 @@ std::string help()
         "  --depth-min-mm N --depth-max-mm N\n"
         "  --gain F --exposure F --frame-time F\n"
         "                                 Optional overrides; omitted means camera value\n"
+        "  --roi true|false               Initial XYZ ROI switch (default: false)\n"
+        "  --roi-min-x F --roi-max-x F    Initial camera/PLY X bounds in mm\n"
+        "  --roi-min-y F --roi-max-y F    Initial camera/PLY Y bounds in mm\n"
+        "  --roi-min-z F --roi-max-z F    Initial camera/PLY Z bounds in mm\n"
+        "  --roi-step-mm F                Initial keyboard adjustment step (default: 5)\n"
         "  -h, --help                    Show this help\n\n"
-        "Viewer keys: S=save current full PLY, Q/Esc=quit.\n";
+        "Viewer keys:\n"
+        "  T=ROI on/off, B=fit ROI to cloud, D=clear ROI, K=print YAML\n"
+        "  X/Y/Z=select axis, N/M=select min/max, [ or ]=adjust bound\n"
+        "  , or .=decrease/increase step, S=save displayed ROI PLY, Q/Esc=quit\n";
 }
 
 bool parseBool(const std::string& value)
@@ -145,6 +183,29 @@ Options parseOptions(int argc, char** argv)
             options.exposure = std::stof(requireValue(i, argc, argv));
         } else if (arg == "--frame-time") {
             options.frame_time = std::stof(requireValue(i, argc, argv));
+        } else if (arg == "--roi" || arg == "--roi-enable") {
+            options.roi.enabled = parseBool(requireValue(i, argc, argv));
+            options.roi_enable_explicit = true;
+        } else if (arg == "--roi-min-x") {
+            options.roi.min_x = std::stof(requireValue(i, argc, argv));
+            options.roi_bound_provided = true;
+        } else if (arg == "--roi-max-x") {
+            options.roi.max_x = std::stof(requireValue(i, argc, argv));
+            options.roi_bound_provided = true;
+        } else if (arg == "--roi-min-y") {
+            options.roi.min_y = std::stof(requireValue(i, argc, argv));
+            options.roi_bound_provided = true;
+        } else if (arg == "--roi-max-y") {
+            options.roi.max_y = std::stof(requireValue(i, argc, argv));
+            options.roi_bound_provided = true;
+        } else if (arg == "--roi-min-z") {
+            options.roi.min_z = std::stof(requireValue(i, argc, argv));
+            options.roi_bound_provided = true;
+        } else if (arg == "--roi-max-z") {
+            options.roi.max_z = std::stof(requireValue(i, argc, argv));
+            options.roi_bound_provided = true;
+        } else if (arg == "--roi-step-mm") {
+            options.roi_step_mm = std::stof(requireValue(i, argc, argv));
         } else {
             throw std::invalid_argument("Unknown option: " + arg);
         }
@@ -166,6 +227,22 @@ Options parseOptions(int argc, char** argv)
     if (has_min && options.depth_max_mm <= options.depth_min_mm) {
         throw std::invalid_argument("Depth range must satisfy min < max.");
     }
+    if (!options.roi_enable_explicit && options.roi_bound_provided) {
+        options.roi.enabled = true;
+    }
+    options.roi.initialized = options.roi_bound_provided;
+    if (std::isnan(options.roi.min_x) || std::isnan(options.roi.max_x) ||
+        std::isnan(options.roi.min_y) || std::isnan(options.roi.max_y) ||
+        std::isnan(options.roi.min_z) || std::isnan(options.roi.max_z) ||
+        options.roi.min_x > options.roi.max_x ||
+        options.roi.min_y > options.roi.max_y ||
+        options.roi.min_z > options.roi.max_z) {
+        throw std::invalid_argument(
+            "ROI bounds cannot be NaN and every minimum must be <= maximum.");
+    }
+    if (!std::isfinite(options.roi_step_mm) || options.roi_step_mm <= 0.0f) {
+        throw std::invalid_argument("--roi-step-mm must be finite and > 0.");
+    }
     return options;
 }
 
@@ -180,15 +257,237 @@ void signalHandler(int)
     g_stop_requested.store(true);
 }
 
+const char* axisName(RoiAxis axis)
+{
+    switch (axis) {
+        case RoiAxis::X: return "X";
+        case RoiAxis::Y: return "Y";
+        case RoiAxis::Z: return "Z";
+    }
+    return "?";
+}
+
+const char* limitName(RoiLimit limit)
+{
+    return limit == RoiLimit::Minimum ? "MIN" : "MAX";
+}
+
+float& selectedBound(RoiControls& controls)
+{
+    if (controls.selected_axis == RoiAxis::X) {
+        return controls.selected_limit == RoiLimit::Minimum
+            ? controls.bounds.min_x : controls.bounds.max_x;
+    }
+    if (controls.selected_axis == RoiAxis::Y) {
+        return controls.selected_limit == RoiLimit::Minimum
+            ? controls.bounds.min_y : controls.bounds.max_y;
+    }
+    return controls.selected_limit == RoiLimit::Minimum
+        ? controls.bounds.min_z : controls.bounds.max_z;
+}
+
+float oppositeBound(const RoiControls& controls)
+{
+    if (controls.selected_axis == RoiAxis::X) {
+        return controls.selected_limit == RoiLimit::Minimum
+            ? controls.bounds.max_x : controls.bounds.min_x;
+    }
+    if (controls.selected_axis == RoiAxis::Y) {
+        return controls.selected_limit == RoiLimit::Minimum
+            ? controls.bounds.max_y : controls.bounds.min_y;
+    }
+    return controls.selected_limit == RoiLimit::Minimum
+        ? controls.bounds.max_z : controls.bounds.min_z;
+}
+
+float matchingBound(const RoiBounds& bounds, RoiAxis axis, RoiLimit limit)
+{
+    if (axis == RoiAxis::X) {
+        return limit == RoiLimit::Minimum ? bounds.min_x : bounds.max_x;
+    }
+    if (axis == RoiAxis::Y) {
+        return limit == RoiLimit::Minimum ? bounds.min_y : bounds.max_y;
+    }
+    return limit == RoiLimit::Minimum ? bounds.min_z : bounds.max_z;
+}
+
+std::string roiValue(float value, int precision = 1)
+{
+    if (std::isinf(value)) return value < 0.0f ? "-inf" : "inf";
+    std::ostringstream output;
+    output << std::fixed << std::setprecision(precision) << value;
+    return output.str();
+}
+
+std::string roiSummary(const RoiBounds& bounds)
+{
+    std::ostringstream output;
+    output << "ROI " << (bounds.enabled ? "ON" : "OFF")
+           << " | X[" << roiValue(bounds.min_x) << ", "
+           << roiValue(bounds.max_x) << "]"
+           << " Y[" << roiValue(bounds.min_y) << ", "
+           << roiValue(bounds.max_y) << "]"
+           << " Z[" << roiValue(bounds.min_z) << ", "
+           << roiValue(bounds.max_z) << "] mm";
+    return output.str();
+}
+
+void printRoiYaml(const RoiControls& controls)
+{
+    const RoiBounds& bounds = controls.bounds;
+    std::cout << "\nROI YAML overrides (camera/PLY coordinates, mm):\n"
+              << "      - \"roi.enable="
+              << (bounds.enabled ? "true" : "false") << "\"\n"
+              << "      - \"roi.min_x=" << roiValue(bounds.min_x, 3) << "\"\n"
+              << "      - \"roi.max_x=" << roiValue(bounds.max_x, 3) << "\"\n"
+              << "      - \"roi.min_y=" << roiValue(bounds.min_y, 3) << "\"\n"
+              << "      - \"roi.max_y=" << roiValue(bounds.max_y, 3) << "\"\n"
+              << "      - \"roi.min_z=" << roiValue(bounds.min_z, 3) << "\"\n"
+              << "      - \"roi.max_z=" << roiValue(bounds.max_z, 3) << "\"\n"
+              << "Edit target: " << axisName(controls.selected_axis) << ' '
+              << limitName(controls.selected_limit)
+              << ", step=" << roiValue(controls.step_mm, 2) << " mm\n\n";
+}
+
+bool validPoint(const cs::float3& point)
+{
+    return std::isfinite(point.x) && std::isfinite(point.y) &&
+        std::isfinite(point.z) && point.z > 0.0f;
+}
+
+bool pointInsideRoi(const cs::float3& point, const RoiBounds& bounds)
+{
+    if (!validPoint(point)) return false;
+    if (!bounds.enabled) return true;
+    return point.x >= bounds.min_x && point.x <= bounds.max_x &&
+        point.y >= bounds.min_y && point.y <= bounds.max_y &&
+        point.z >= bounds.min_z && point.z <= bounds.max_z;
+}
+
+bool cloudBounds(
+    const std::vector<cs::float3>& vertices, RoiBounds& output)
+{
+    output.min_x = output.min_y = output.min_z =
+        std::numeric_limits<float>::infinity();
+    output.max_x = output.max_y = output.max_z =
+        -std::numeric_limits<float>::infinity();
+    bool found = false;
+    for (const cs::float3& point : vertices) {
+        if (!validPoint(point)) continue;
+        found = true;
+        output.min_x = std::min(output.min_x, point.x);
+        output.max_x = std::max(output.max_x, point.x);
+        output.min_y = std::min(output.min_y, point.y);
+        output.max_y = std::max(output.max_y, point.y);
+        output.min_z = std::min(output.min_z, point.z);
+        output.max_z = std::max(output.max_z, point.z);
+    }
+    output.initialized = found;
+    return found;
+}
+
+void processRoiRequests(
+    RoiControls& controls, const std::vector<cs::float3>& vertices)
+{
+    bool changed = false;
+    if (controls.fit_requested ||
+        (controls.pending_adjustment != 0 && !controls.bounds.initialized)) {
+        RoiBounds fitted;
+        if (cloudBounds(vertices, fitted)) {
+            fitted.enabled = true;
+            controls.bounds = fitted;
+            changed = true;
+            std::cout << "ROI fitted to the current valid cloud.\n";
+        } else {
+            std::cerr << "Warning: cannot fit ROI because the current cloud is empty.\n";
+        }
+        controls.fit_requested = false;
+    }
+
+    if (controls.pending_adjustment != 0 && controls.bounds.initialized) {
+        float& active = selectedBound(controls);
+        if (!std::isfinite(active)) {
+            RoiBounds full_bounds;
+            if (cloudBounds(vertices, full_bounds)) {
+                active = matchingBound(
+                    full_bounds, controls.selected_axis, controls.selected_limit);
+            }
+        }
+
+        if (std::isfinite(active)) {
+            const float candidate = active +
+                controls.step_mm * static_cast<float>(controls.pending_adjustment);
+            const float opposite = oppositeBound(controls);
+            const bool valid_order = controls.selected_limit == RoiLimit::Minimum
+                ? candidate <= opposite : candidate >= opposite;
+            if (valid_order) {
+                active = candidate;
+                controls.bounds.enabled = true;
+                changed = true;
+            } else {
+                std::cerr << "Warning: rejected ROI adjustment because MIN must be <= MAX.\n";
+            }
+        }
+        controls.pending_adjustment = 0;
+    }
+
+    if (changed) {
+        ++controls.revision;
+        controls.print_requested = true;
+    }
+    if (controls.print_requested) {
+        printRoiYaml(controls);
+        controls.print_requested = false;
+    }
+}
+
 void keyboardCallback(
-    const pcl::visualization::KeyboardEvent& event, void*)
+    const pcl::visualization::KeyboardEvent& event, void* context)
 {
     if (!event.keyDown()) return;
     const std::string key = event.getKeySym();
+    auto* controls = static_cast<RoiControls*>(context);
     if (key == "s" || key == "S") {
         g_save_requested.store(true);
     } else if (key == "q" || key == "Q" || key == "Escape") {
         g_stop_requested.store(true);
+    } else if (!controls) {
+        return;
+    } else if (key == "t" || key == "T") {
+        controls->bounds.enabled = !controls->bounds.enabled;
+        if (controls->bounds.enabled && !controls->bounds.initialized) {
+            controls->fit_requested = true;
+        }
+        ++controls->revision;
+        controls->print_requested = true;
+    } else if (key == "b" || key == "B") {
+        controls->fit_requested = true;
+    } else if (key == "d" || key == "D") {
+        controls->bounds = RoiBounds{};
+        ++controls->revision;
+        controls->print_requested = true;
+    } else if (key == "k" || key == "K") {
+        controls->print_requested = true;
+    } else if (key == "x" || key == "X") {
+        controls->selected_axis = RoiAxis::X;
+    } else if (key == "y" || key == "Y") {
+        controls->selected_axis = RoiAxis::Y;
+    } else if (key == "z" || key == "Z") {
+        controls->selected_axis = RoiAxis::Z;
+    } else if (key == "n" || key == "N") {
+        controls->selected_limit = RoiLimit::Minimum;
+    } else if (key == "m" || key == "M") {
+        controls->selected_limit = RoiLimit::Maximum;
+    } else if (key == "bracketleft" || key == "[") {
+        --controls->pending_adjustment;
+    } else if (key == "bracketright" || key == "]") {
+        ++controls->pending_adjustment;
+    } else if (key == "comma" || key == ",") {
+        controls->step_mm = std::max(0.1f, controls->step_mm * 0.5f);
+        std::cout << "ROI adjustment step: " << controls->step_mm << " mm\n";
+    } else if (key == "period" || key == ".") {
+        controls->step_mm = std::min(100.0f, controls->step_mm * 2.0f);
+        std::cout << "ROI adjustment step: " << controls->step_mm << " mm\n";
     }
 }
 
@@ -363,31 +662,34 @@ void depthColor(float t, std::uint8_t& r, std::uint8_t& g, std::uint8_t& b)
 }
 
 pcl::PointCloud<pcl::PointXYZRGB>::Ptr makeDisplayCloud(
-    const std::vector<cs::float3>& vertices, std::size_t max_points)
+    const std::vector<cs::float3>& vertices,
+    const RoiBounds& roi,
+    std::size_t max_points,
+    std::size_t& retained_points)
 {
     auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+    retained_points = 0;
     if (vertices.empty()) return cloud;
 
     float min_z = std::numeric_limits<float>::max();
     float max_z = std::numeric_limits<float>::lowest();
     for (const cs::float3& point : vertices) {
-        if (!std::isfinite(point.z) || point.z <= 0.0f) continue;
+        if (!pointInsideRoi(point, roi)) continue;
+        ++retained_points;
         min_z = std::min(min_z, point.z);
         max_z = std::max(max_z, point.z);
     }
-    if (!(max_z >= min_z)) return cloud;
+    if (retained_points == 0 || !(max_z >= min_z)) return cloud;
 
     const std::size_t stride = std::max<std::size_t>(
-        1, (vertices.size() + max_points - 1) / max_points);
-    cloud->reserve((vertices.size() + stride - 1) / stride);
+        1, (retained_points + max_points - 1) / max_points);
+    cloud->reserve((retained_points + stride - 1) / stride);
     const float span = std::max(1.0e-6f, max_z - min_z);
 
-    for (std::size_t i = 0; i < vertices.size(); i += stride) {
-        const cs::float3& source = vertices[i];
-        if (!std::isfinite(source.x) || !std::isfinite(source.y) ||
-            !std::isfinite(source.z) || source.z <= 0.0f) {
-            continue;
-        }
+    std::size_t retained_index = 0;
+    for (const cs::float3& source : vertices) {
+        if (!pointInsideRoi(source, roi)) continue;
+        if (retained_index++ % stride != 0) continue;
         pcl::PointXYZRGB point;
         point.x = source.x;
         point.y = source.y;
@@ -399,6 +701,78 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr makeDisplayCloud(
     cloud->height = 1;
     cloud->is_dense = true;
     return cloud;
+}
+
+std::size_t filterPointcloudInPlace(
+    cs::Pointcloud& pointcloud, const RoiBounds& roi)
+{
+    auto& vertices = pointcloud.getVertices();
+    auto& normals = pointcloud.getNormals();
+    auto& texcoords = pointcloud.getTexcoords();
+    const std::size_t original_size = vertices.size();
+    if (normals.size() != original_size) {
+        throw std::runtime_error(
+            "Cannot save PLY: SDK vertex/normal array sizes do not match.");
+    }
+    const bool textures_aligned = texcoords.size() == original_size;
+
+    std::size_t output_index = 0;
+    for (std::size_t input_index = 0; input_index < original_size; ++input_index) {
+        if (!pointInsideRoi(vertices[input_index], roi)) continue;
+        if (output_index != input_index) {
+            vertices[output_index] = vertices[input_index];
+            normals[output_index] = normals[input_index];
+            if (textures_aligned) {
+                texcoords[output_index] = texcoords[input_index];
+            }
+        }
+        ++output_index;
+    }
+    vertices.resize(output_index);
+    normals.resize(output_index);
+    if (textures_aligned) texcoords.resize(output_index);
+    return output_index;
+}
+
+bool finiteRoiBox(const RoiBounds& bounds)
+{
+    return bounds.enabled &&
+        std::isfinite(bounds.min_x) && std::isfinite(bounds.max_x) &&
+        std::isfinite(bounds.min_y) && std::isfinite(bounds.max_y) &&
+        std::isfinite(bounds.min_z) && std::isfinite(bounds.max_z) &&
+        bounds.min_x < bounds.max_x && bounds.min_y < bounds.max_y &&
+        bounds.min_z < bounds.max_z;
+}
+
+void updateRoiBox(
+    const pcl::visualization::PCLVisualizer::Ptr& viewer,
+    const RoiControls& controls,
+    bool& box_exists,
+    std::size_t& displayed_revision)
+{
+    if (displayed_revision == controls.revision) return;
+    if (box_exists) {
+        viewer->removeShape("roi_box");
+        box_exists = false;
+    }
+    if (finiteRoiBox(controls.bounds)) {
+        const RoiBounds& bounds = controls.bounds;
+        box_exists = viewer->addCube(
+            bounds.min_x, bounds.max_x,
+            bounds.min_y, bounds.max_y,
+            bounds.min_z, bounds.max_z,
+            1.0, 0.85, 0.1, "roi_box");
+        if (box_exists) {
+            viewer->setShapeRenderingProperties(
+                pcl::visualization::PCL_VISUALIZER_REPRESENTATION,
+                pcl::visualization::PCL_VISUALIZER_REPRESENTATION_WIREFRAME,
+                "roi_box");
+            viewer->setShapeRenderingProperties(
+                pcl::visualization::PCL_VISUALIZER_LINE_WIDTH,
+                2.0, "roi_box");
+        }
+    }
+    displayed_revision = controls.revision;
 }
 
 void runViewer(const Options& options)
@@ -470,15 +844,28 @@ void runViewer(const Options& options)
 
     std::filesystem::create_directories(options.save_dir);
 
+    RoiControls roi_controls;
+    roi_controls.bounds = options.roi;
+    roi_controls.step_mm = options.roi_step_mm;
+    roi_controls.fit_requested =
+        roi_controls.bounds.enabled && !roi_controls.bounds.initialized;
+    roi_controls.print_requested =
+        roi_controls.bounds.enabled || options.roi_bound_provided;
+
     auto viewer = pcl::make_shared<pcl::visualization::PCLVisualizer>(
         "Chishine3D Live Point Cloud");
     viewer->setBackgroundColor(0.04, 0.04, 0.06);
     viewer->addCoordinateSystem(100.0);
     viewer->addText("Waiting for depth frame...", 10, 10, 14, 1.0, 1.0, 1.0,
                     "status");
-    viewer->addText("S: save PLY    Q/Esc: quit", 10, 32, 14,
-                    0.9, 0.9, 0.3, "help");
-    viewer->registerKeyboardCallback(keyboardCallback, nullptr);
+    viewer->addText("ROI OFF | camera/PLY XYZ in mm", 10, 32, 14,
+                    0.3, 1.0, 0.4, "roi_status");
+    viewer->addText("Edit X MIN | step 5.0 mm", 10, 54, 14,
+                    0.4, 0.9, 1.0, "roi_edit");
+    viewer->addText(
+        "T:ROI  B:fit  D:clear  X/Y/Z:axis  N/M:min/max  [ ]:adjust  , .:step  K:print  S:save  Q:quit",
+        10, 76, 12, 0.9, 0.9, 0.3, "help");
+    viewer->registerKeyboardCallback(keyboardCallback, &roi_controls);
     if (viewer->getRenderWindow() &&
         viewer->getRenderWindow()->GetInteractor()) {
         viewer->getRenderWindow()->GetInteractor()->Initialize();
@@ -488,8 +875,15 @@ void runViewer(const Options& options)
     std::size_t frame_number = 0;
     auto previous_time = std::chrono::steady_clock::now();
     double smoothed_fps = 0.0;
+    bool roi_box_exists = false;
+    std::size_t displayed_roi_revision =
+        std::numeric_limits<std::size_t>::max();
 
-    std::cout << "Live viewer started. S=save full PLY, Q/Esc=quit.\n";
+    std::cout
+        << "Live viewer started. Default ROI is OFF (full cloud).\n"
+        << "ROI keys: T=on/off, B=fit current cloud, D=clear, K=print YAML,\n"
+        << "          X/Y/Z=axis, N/M=min/max, [ ]=adjust, , .=step.\n"
+        << "S saves exactly the current ROI cloud; Q/Esc quits.\n";
     while (!g_stop_requested.load() && !viewer->wasStopped()) {
         cs::IFramePtr frame;
         result = guard.camera()->getFrame(
@@ -527,8 +921,11 @@ void runViewer(const Options& options)
             &intrinsics, nullptr, nullptr, true);
 
         const std::vector<cs::float3>& vertices = pointcloud.getVertices();
+        processRoiRequests(roi_controls, vertices);
+        std::size_t roi_point_count = 0;
         auto display_cloud = makeDisplayCloud(
-            vertices, options.max_display_points);
+            vertices, roi_controls.bounds,
+            options.max_display_points, roi_point_count);
 
         if (!cloud_added) {
             viewer->addPointCloud<pcl::PointXYZRGB>(display_cloud, "live_cloud");
@@ -542,6 +939,8 @@ void runViewer(const Options& options)
             viewer->updatePointCloud<pcl::PointXYZRGB>(
                 display_cloud, "live_cloud");
         }
+        updateRoiBox(
+            viewer, roi_controls, roi_box_exists, displayed_roi_revision);
 
         const auto now = std::chrono::steady_clock::now();
         const double seconds = std::chrono::duration<double>(
@@ -571,16 +970,44 @@ void runViewer(const Options& options)
                << " | " << std::setprecision(1)
                << smoothed_fps << " Hz";
         viewer->updateText(status.str(), 10, 10, "status");
+        std::ostringstream roi_status;
+        roi_status << roiSummary(roi_controls.bounds)
+                   << " | retained " << roi_point_count;
+        viewer->updateText(roi_status.str(), 10, 32, "roi_status");
+        std::ostringstream roi_edit;
+        roi_edit << "Edit " << axisName(roi_controls.selected_axis) << ' '
+                 << limitName(roi_controls.selected_limit)
+                 << " | step " << roiValue(roi_controls.step_mm, 2) << " mm";
+        viewer->updateText(roi_edit.str(), 10, 54, "roi_edit");
         processViewerEvents(viewer, 1);
 
+        // 键盘事件在 ProcessEvents() 内触发；立即应用到本帧，保证随后按 S
+        // 保存时使用刚刚看到并调好的 ROI，而不是上一轮边界。
+        processRoiRequests(roi_controls, vertices);
+
         if (g_save_requested.exchange(false)) {
+            const std::size_t original_points =
+                static_cast<std::size_t>(pointcloud.size());
+            const std::size_t saved_points = roi_controls.bounds.enabled
+                ? filterPointcloudInPlace(pointcloud, roi_controls.bounds)
+                : original_points;
+            if (saved_points == 0) {
+                std::cerr
+                    << "Warning: current ROI contains zero points; snapshot was not saved.\n";
+                continue;
+            }
             const std::filesystem::path path = snapshotPath(options.save_dir);
             pointcloud.exportToFile(
                 path.string(), nullptr, 0, 0, options.binary_ply);
             if (std::filesystem::exists(path) &&
                 std::filesystem::file_size(path) > 0) {
                 std::cout << "Saved snapshot: " << path
-                          << " (points=" << pointcloud.size() << ")\n";
+                          << " (points=" << saved_points << "/"
+                          << original_points
+                          << ", ROI="
+                          << (roi_controls.bounds.enabled ? "on" : "off")
+                          << ")\n";
+                printRoiYaml(roi_controls);
             } else {
                 std::cerr << "Warning: snapshot write failed: " << path << '\n';
             }
