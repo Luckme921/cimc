@@ -14,7 +14,7 @@ weld_seam_node:
     # SDK 参数使用说明：
     # 1. 每项必须是完整字符串：- "key=value"。
     # 2. 下面已启用的 5 项是当前现场配置，本次不改变。
-    # 3. 其余是 SDK 2.2.1 默认值模板；删掉行首的 "# " 即可启用。
+    # 3. 其余是 SDK 2.2.2 默认值模板；删掉行首的 "# " 即可启用。
     # 4. 不要同时启用同一 key 的多行；修改后重启节点/launch 生效，无需编译。
     # 5. config_file 非空时先读外部 .conf，algorithm_overrides 再覆盖同名项。
     algorithm_overrides:
@@ -30,12 +30,12 @@ weld_seam_node:
       # ==================== ROI（相机/PLY 坐标系，mm） ====================
       # roi.enable=true 时下面的边界参与过滤。
       # 启用 ROI 前建议同时确认 X/Y/Z 六个边界；-inf/inf 表示不限制。
-      - "roi.min_x=-190"
-      - "roi.max_x=200"
-      - "roi.min_y=-inf"
-      - "roi.max_y=inf"
-      - "roi.min_z=400"
-      - "roi.max_z=550"
+      - "roi.min_x=-162.5"
+      - "roi.max_x=199.9"
+      - "roi.min_y=-27"
+      - "roi.max_y=133"
+      - "roi.min_z=-inf"
+      - "roi.max_z=inf"
 
       # ==================== 法向量 ====================
       # normal.mode: auto（优先复用，质量不足则重算）/recompute/reuse。
@@ -67,6 +67,7 @@ weld_seam_node:
       # - "feature.max_hole_bridge=70.0"
       # - "feature.max_corner_extrapolation=18.0"
       # - "feature.min_corner_angle_deg=10.0"
+      # 同时作为相邻物理角最小安全间距，抑制短假线段插入多余点。
       # - "feature.duplicate_corner_merge_distance=18.0"
       # - "feature.corner_fit_support_distance=5.0"
       # - "feature.recessed_chord_search_radius=7.0"

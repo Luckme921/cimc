@@ -2,7 +2,7 @@
 
 本工作区面向 Ubuntu 22.04 x86_64 + ROS 2 Humble，用于 Chishine 3D 相机采集、波纹板焊缝识别、手眼变换、ABB 通信以及后续焊机/旋弧电机联动。
 
-当前已经打通“相机软件触发 -> PLY -> 焊缝 SDK -> 相机坐标系焊接位姿 -> 手眼变换 -> `robot_base` 轨迹”的 ROS 2 链路。2026-09-03 现场测试已证明变换后 XYZ 与实际焊缝点基本重合。2026-09-05 已将算法 Tool X 从随局部角平分线变化改为可配置的工件 `+X/-X` 参考，并完成多组现场 PLY 离线回归；仍需在重新定义 ABB tooldata 和重新手眼标定后进行真实机器人姿态/可达性验证。
+当前已经打通“ABB 拍照请求 -> 相机软件触发 -> PLY -> 焊缝 SDK -> 相机坐标系焊接位姿 -> 手眼变换 -> `robot_base` 轨迹 -> ABB 接收确认”的 ROS 2 链路。2026-09-10 现场重新定义 ABB tooldata、重做手眼标定后，点位和 ABB 通信已对接成功。2026-09-21 将焊缝 SDK 升级为 2.2.2，针对短假线段、多余拐点和首末拐点偶发缺失增加四类周期拓扑稳定；已完成历史 PLY 离线回归，尚未对 2.2.2 进行真实硬件验证。
 
 2026-09-10 开始把焊接工艺决策移交给 `192.168.3.5`：x86 不再根据 ABB 点号自行选择工艺，只负责校验并执行送气、起焊、实时电流/旋转速度和停焊指令。双方固定使用逐行 JSON v1 协议；`data_receiver_node` 把第三方请求直接映射到现有焊机/电机话题，并把 ABB 数据和每个焊机 TPDO1 真实反馈按带边界的 JSON 帧发回 `192.168.3.5:50000`。完整协议见 [第三方焊接通信协议.md](./第三方焊接通信协议.md)。
 
@@ -21,7 +21,8 @@ x86_ros2_ws/
 ├── 第三方焊接通信协议.md       # 与192.168.3.5约定的JSONL v1
 ├── x86_chishine_camera_test/   # 相机SDK与独立抓图参考，COLCON_IGNORE
 ├── x86_chishine_live_viewer/   # 实时点云选位工具，COLCON_IGNORE
-├── scut_weld_sdk_install/      # 可随Git保存的焊缝SDK安装副本
+├── x86_weld_seam_test/         # 焊缝算法/CLI/SDK源码，独立CMake工程
+├── scut_weld_sdk_install/      # 历史SDK安装快照，仅作兼容参考
 └── src/
     ├── cimc/                    # Python：ABB 数据 + 旋转焊枪电机
     ├── weld_controller/         # C++：USB-CAN 焊机 + 历史工艺逻辑
@@ -29,7 +30,7 @@ x86_ros2_ws/
     └── weld_seam_perception/    # C++：进程内调用 weld_seam_sdk
 ```
 
-仓库根目录的三个参考/SDK目录通过 `COLCON_IGNORE` 与 ROS package 隔离。当前机器仍优先使用 `~/x86_chishine_camera_test/vendor_sdk` 和 `~/scut_weld_sdk_install`；换机时需要按本文设置 SDK 路径。旧 `weld_logic_node.cpp` 只保留为历史源码，不再编译或安装；第三方命令由 `data_receiver_node` 直接映射到底层话题。
+仓库根目录的独立参考/SDK目录不位于 `src/`，不会被 colcon 当作 ROS package。当前机器使用 `~/x86_chishine_camera_test/vendor_sdk` 和 `~/scut_weld_sdk_install`；焊缝 SDK 的受控源码位于本仓库 `x86_weld_seam_test/`，仓库内同名安装快照不是当前运行库。换机时需要先从受控源码安装 SDK，再按本文设置路径。旧 `weld_logic_node.cpp` 只保留为历史源码，不再编译或安装；第三方命令由 `data_receiver_node` 直接映射到底层话题。
 
 每个包目录均有自己的中文 `README.md`，说明内部源码、参数和接口。
 
@@ -43,7 +44,7 @@ flowchart LR
     Q -->|"Trigger /camera/capture"| C["chishine_camera_node"]
     C -->|"保存 PLY"| P[("~/scut_weld_data/pointclouds")]
     C -->|"/camera/pointcloud_file\nString 绝对路径"| S["weld_seam_node"]
-    S -->|"进程内 C++ 调用"| SDK["libweld_seam_sdk.so 2.2.1"]
+    S -->|"进程内 C++ 调用"| SDK["libweld_seam_sdk.so 2.2.2"]
     SDK --> R[("~/scut_weld_data/weld_results")]
     S -->|"/weld_seam/poses_camera_frame"| H["handeye_abb_bridge_node"]
     Q -->|"拍照时 Base_from_TCP + 单次授权"| H
@@ -69,7 +70,7 @@ flowchart LR
 |---|---|
 | Chishine 相机独立抓图与实时查看器 | 历史硬件单测和 2026-09-03 现场连接通过 |
 | ROS 相机软件触发与 PLY 发布 | 现场软触发成功，960x600 点云已落盘并发布 |
-| 焊缝 SDK 2.2.1 与 ROS 进程内调用 | 现场新拍 PLY 已成功生成 6 个焊点和 2 个过渡点；ROS 已链接安装目录中的 2.2.1 |
+| 焊缝 SDK 2.2.2 与 ROS 进程内调用 | 四类周期拓扑与边界补点已完成历史 PLY 离线回归；2.2.2 已安装且 ROS 节点已重新链接，待现场复验 |
 | 焊缝关键点与相机系姿态 | Tool X 可选工件 `+X/-X` 或旧角平分线；5 组 PLY 离线回归保持 XYZ/分类/Tool Z 不变，真实姿态待验证 |
 | 任务协调与手眼桥接 | 完整链路已输出 8 个基坐标位姿，XYZ 初步现场对齐；需重建 TCP、重做手眼后再验证姿态与可达性 |
 | ABB 自动接收/发送 | 已增加 `.3.100:45000 <- .3.2` 双向联调 launch、换行分帧与轨迹文本输出；真实 ABB 收发待现场验证 |
@@ -116,7 +117,7 @@ rosdep update
 ROS 包 `weld_seam_perception` 通过 CMake config 查找 SDK：
 
 ```bash
-cd ~/x86_weld_seam_test
+cd ~/x86_ros2_ws/x86_weld_seam_test
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 cmake --install build --prefix "$HOME/scut_weld_sdk_install"
@@ -125,14 +126,19 @@ export CMAKE_PREFIX_PATH="$HOME/scut_weld_sdk_install:$CMAKE_PREFIX_PATH"
 export LD_LIBRARY_PATH="$HOME/scut_weld_sdk_install/lib:$LD_LIBRARY_PATH"
 ```
 
+修改前的 SDK 2.2.1 源码快照保存在
+`~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.1`，其中的 `README.md`
+给出了完整回退命令。安装目录同时保留版本化动态库
+`libweld_seam_sdk.so.2.2.1` 和 `libweld_seam_sdk.so.2.2.2`；正常切换版本仍应从
+对应源码重新构建、安装并重启 ROS 节点，不建议手工改动动态库软链接。
+
 建议把最后两行加入项目专用环境脚本，而不是全局覆盖系统库搜索顺序。
 
 ## 6. 准备相机 SDK
 
-如果三个目录保持同级：
+相机 SDK 仍可保持在工作区同级目录：
 
 ```text
-~/x86_weld_seam_test
 ~/x86_ros2_ws
 ~/x86_chishine_camera_test
 ```
@@ -433,7 +439,7 @@ ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
 - 相机 SDK 直接使用深度相机内参生成 PLY：`x=(u-cx)z/fx`、`y=(v-cy)z/fy`、`z=depth`。因此 PLY 原点是深度相机的理想光心，X 随图像列向右、Y 随图像行向下、Z 沿深度方向向前。
 - 当前采集关闭 RGB，生成点云时没有应用 Depth-to-RGB 外参；所以手眼标定矩阵必须对应这个**深度光学坐标系**。如果标定使用的是 RGB 光心、相机外壳坐标系或其他坐标系，必须补上相应固定外参，不能只把话题 `frame_id` 改成 `camera_link`。
 - 当前手眼节点按 eye-in-hand 链计算：`Base_from_Tool = Base_from_TCP_at_capture * TCP_from_Camera * Camera_from_Tool`。
-- SDK 2.2.1 默认使用 `orientation.tool_x_reference=workpiece_x`：保持算法 Tool Z 不变，将所选工件 `+X/-X` 投影到 Tool Z 的法平面作为 Tool X，再按右手系生成 Tool Y。方向由 `orientation.tool_x_points_along_positive_workpiece_x` 选择；`corner_bisector` 只用于回退旧行为。
+- SDK 2.2.2 默认使用 `orientation.tool_x_reference=workpiece_x`：保持算法 Tool Z 不变，将所选工件 `+X/-X` 投影到 Tool Z 的法平面作为 Tool X，再按右手系生成 Tool Y。方向由 `orientation.tool_x_points_along_positive_workpiece_x` 选择；`corner_bisector` 只用于回退旧行为。
 - 固定 Tool X 参考可减少绕焊枪自身轴的非工艺性滚转，但目标笛卡尔姿态并不等于唯一关节解，也不能单独保证可达；ABB 的关节限位、`robconf`、奇异点和碰撞仍需单独检查。
 - 当示教器数据确实是 `Base_from_TCP`、手眼矩阵方向正确、算法 Tool 与 ABB 当前枪尖 TCP 定义一致时，`/abb/trajectory_tcp` 的位置和姿态就是机器人基坐标系下的目标，`frame_id=robot_base`。
 - 如果示教器输出相对于工件/用户坐标系，必须先转换到 Base；代码当前不读取 ABB `wobjdata`，也不会自动完成这一步。

@@ -587,3 +587,103 @@ ros2 topic echo /handeye_bridge/status
 # ------------------------------------------------------------
 # 终端A按Ctrl+C停止整条联调launch，然后确认无遗留节点。
 ros2 node list
+
+# ============================================================
+# 14. 历史PLY离线验证焊缝提取算法（不连接任何硬件）
+# ============================================================
+# 本节不启动相机、手眼、任务协调、ABB、焊机或电机节点，不会造成物理动作。
+# 示例文件确认存在；测试其他历史文件时，只替换输入PLY和输出前缀。
+# 推荐先用14.1直接验证算法，再用14.2验证ROS节点和weld_seam.yaml。
+
+# ------------------------------------------------------------
+# 14.1 方式A：直接运行当前工作区算法CLI（完全不启动ROS）
+# ------------------------------------------------------------
+cd ~/x86_ros2_ws
+mkdir -p /tmp/weld_seam_offline
+
+./x86_weld_seam_test/build/weld_seam_extractor \
+  /home/mini/scut_weld_data/pointclouds/capture_1789700756976.ply \
+  /tmp/weld_seam_offline \
+  capture_1789700756976 \
+  --config ./x86_weld_seam_test/config/default.conf \
+  --set roi.enable=true \
+  --set roi.min_x=-162.5 \
+  --set roi.max_x=199.9 \
+  --set roi.min_y=-27 \
+  --set roi.max_y=133 \
+  --set roi.min_z=-inf \
+  --set roi.max_z=inf \
+  --set normal.mode=auto \
+  --set orientation.tool_positive_z_points_from_tcp_to_body=false \
+  --set orientation.tool_x_reference=workpiece_x \
+  --set orientation.tool_x_points_along_positive_workpiece_x=false
+
+# 输出目录中应生成：
+# capture_1789700756976_features.csv       焊接点、类型、位置和姿态
+# capture_1789700756976_feature_points.ply  特征点可视化
+# capture_1789700756976_result.ply          完整彩色结果可视化
+ls -lh /tmp/weld_seam_offline
+
+# 修改算法C++后，只需重新构建独立算法，再重复上面的命令：
+cmake -S ~/x86_ros2_ws/x86_weld_seam_test \
+  -B ~/x86_ros2_ws/x86_weld_seam_test/build \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build ~/x86_ros2_ws/x86_weld_seam_test/build -j2
+
+# ------------------------------------------------------------
+# 14.2 方式B：只启动焊缝ROS节点，验证weld_seam.yaml和话题输出
+# ------------------------------------------------------------
+# 终端A：只启动软件算法节点；不启动camera/handeye/coordinator/ABB等节点。
+# 使用独立ROS_DOMAIN_ID=232，避免与现场默认Domain中的硬件节点互相发现。
+cd ~/x86_ros2_ws
+source /opt/ros/humble/setup.bash
+source ~/x86_ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=232
+export ROS_LOG_DIR=/tmp/ros2_weld_offline_logs
+mkdir -p "$ROS_LOG_DIR"
+ros2 run weld_seam_perception weld_seam_node --ros-args \
+  --params-file ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml \
+  -p output_directory:=/tmp/weld_ros_offline
+
+# 终端B：先等待一次处理状态；必须在终端C发布PLY路径前启动。
+source /opt/ros/humble/setup.bash
+source ~/x86_ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=232
+export ROS_LOG_DIR=/tmp/ros2_weld_offline_logs
+ros2 topic echo --once /weld_seam/status
+
+# 终端C：将历史PLY路径发布到算法输入话题；这里只传文件名，不采集相机。
+source /opt/ros/humble/setup.bash
+source ~/x86_ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=232
+export ROS_LOG_DIR=/tmp/ros2_weld_offline_logs
+ros2 topic pub --once \
+  --qos-durability transient_local \
+  --qos-reliability reliable \
+  /camera/pointcloud_file std_msgs/msg/String \
+  "{data: '/home/mini/scut_weld_data/pointclouds/capture_1789700756976.ply'}"
+
+# 终端C：发布完成后继续查看本次离线处理输出；下面三个结果话题具有
+# transient_local持久性，因此算法已经处理完后再执行也能读到最后一条消息。
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable \
+  /weld_seam/result_csv
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable \
+  /weld_seam/result_visualization
+ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable \
+  /weld_seam/poses_camera_frame
+ls -lh /tmp/weld_ros_offline
+
+# 提示：algorithm_overrides中的参数在节点启动时读取。
+# 修改src/weld_seam_perception/config/weld_seam.yaml后，无需重新编译，
+# 但必须Ctrl+C停止终端A并重新运行节点，新的参数才会生效。
+
+# ------------------------------------------------------------
+# 14.3 版本检查和2.2.1回退位置
+# ------------------------------------------------------------
+readlink -f ~/scut_weld_sdk_install/lib/libweld_seam_sdk.so.2
+# 当前期望：libweld_seam_sdk.so.2.2.2
+
+# 修改前2.2.1源码快照：
+# ~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.1
+# 完整回退构建/安装命令见：
+# ~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.1/README.md
