@@ -99,6 +99,8 @@ class HandeyeAbbBridgeNode(Node):
             'send_to_abb', False).value)
         self.protocol_precision = int(self.declare_parameter(
             'protocol_precision', 6).value)
+        self.max_trajectory_points = int(self.declare_parameter(
+            'max_trajectory_points', 100).value)
         if self.translation_unit not in ('mm', 'm'):
             raise ValueError('matrix_translation_unit must be mm or m')
         if self.matrix_direction not in (
@@ -108,6 +110,9 @@ class HandeyeAbbBridgeNode(Node):
                 'or camera_from_tcp')
         if not 0 <= self.protocol_precision <= 9:
             raise ValueError('protocol_precision must be within [0, 9]')
+        if not 1 <= self.max_trajectory_points <= 100:
+            raise ValueError(
+                'max_trajectory_points must be within [1, 100] for ABB storage')
 
         self.transform = load_opencv_matrix(self.matrix_file, self.matrix_key)
         if self.translation_unit == 'mm':
@@ -137,7 +142,8 @@ class HandeyeAbbBridgeNode(Node):
             f'Hand-eye bridge ready: file={self.matrix_file}, key={self.matrix_key}, '
             f'direction={self.matrix_direction}, output_frame={self.output_frame}, '
             f'require_task_armed={self.require_task_armed}, '
-            f'send_to_abb={self.send_to_abb}')
+            f'send_to_abb={self.send_to_abb}, '
+            f'max_trajectory_points={self.max_trajectory_points}')
 
     def _status(self, success, message, **extra):
         body = {'success': success, 'message': message}
@@ -177,6 +183,16 @@ class HandeyeAbbBridgeNode(Node):
             return
         if not msg.poses:
             self._status(False, 'input PoseArray is empty')
+            return
+        if len(msg.poses) > self.max_trajectory_points:
+            self._status(
+                False,
+                'trajectory exceeds ABB point storage limit',
+                count=len(msg.poses),
+                max_trajectory_points=self.max_trajectory_points)
+            self._armed = not self.require_task_armed
+            if self.require_capture_pose:
+                self.base_from_tcp = None
             return
         output = PoseArray()
         output.header.stamp = self.get_clock().now().to_msg()

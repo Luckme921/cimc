@@ -50,7 +50,7 @@ ros2 topic pub --once /cimc/motor_speed std_msgs/msg/Float32 "{data: 0.0}"
 本包现在还安装两个节点：
 
 - `weld_task_coordinator_node`：从 `/abb/raw_text` 接收独立一行 `START_CAPTURE`，调用 `/camera/capture`，等待焊缝算法结果，并对本次轨迹发布一次性授权。
-- `handeye_abb_bridge_node`：读取 OpenCV YAML 里的 `handEyeMatrix`，对 `/weld_seam/poses_camera_frame` 的位置和四元数作刚体变换，发布 `/abb/trajectory_tcp`，再把换算为 mm 的 ASCII 轨迹发往 `/abb/tx_text`。
+- `handeye_abb_bridge_node`：读取 OpenCV YAML 里的 `handEyeMatrix`，对 `/weld_seam/poses_camera_frame` 的位置和四元数作刚体变换，发布 `/abb/trajectory_tcp`，再把换算为 mm 的 ASCII 轨迹发往 `/abb/tx_text`；超过 `max_trajectory_points=100` 时拒绝输出，保护 ABB 存储上限。
 
 `data_receiver_node` 新增订阅 `/abb/tx_text`，并使用 ABB 已经建立的 TCP 连接发送；`/abb/tx_status` 只表示 socket `sendall()` 结果，不等于 ABB RAPID 已解析或已执行。
 

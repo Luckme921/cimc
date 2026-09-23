@@ -1,6 +1,6 @@
 # weld_seam_perception 包说明
 
-该包是焊缝 SDK 2.2 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。
+该包是焊缝 SDK 2.3 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。
 
 ## 文件作用
 
@@ -49,11 +49,12 @@ CSV 和 PoseArray 发布者为 Transient Local，后启动的调试订阅者能�
 
 ```yaml
 algorithm_overrides:
-  - "roi.enable=false"
+  - "roi.enable=true"
   - "normal.mode=auto"
   - "orientation.tool_positive_z_points_from_tcp_to_body=false"
   - "orientation.tool_x_reference=workpiece_x"
-  - "orientation.tool_x_points_along_positive_workpiece_x=true"
+  - "orientation.tool_x_points_along_positive_workpiece_x=false"
+  - "path.mode=feature_points"
 ```
 
 `tool_x_reference=workpiece_x` 时，算法保持 Tool Z 不变，并将工件焊接前进轴投影到 Tool Z 的法平面作为 Tool X，以减少局部角点造成的绕枪轴滚转。现场 TCP +X 与焊接前进方向相反时，只需把 `tool_x_points_along_positive_workpiece_x` 改为 `false`；需要复现 SDK 2.2.0 行为时可将参考模式改为 `corner_bisector`。
@@ -67,6 +68,18 @@ ROI、四类位置偏置、四类姿态等均可继续添加，不用重新编�
 ```
 
 完整键名及含义见 `x86_weld_seam_test/config/default.conf` 和该工程 README。
+
+路径模式只需在同一个 YAML 中切换，launch 不覆盖该参数：
+
+```yaml
+# 现场已验证的四类拐点模式（默认）
+- "path.mode=feature_points"
+
+# 曲率轮廓备用模式；ROS话题、CSV列、手眼和ABB协议均不变
+- "path.mode=adaptive_contour"
+```
+
+两行不能同时启用。连续模式默认按直线约 12 mm、曲率区约 4 mm 采样，并把首末安全点计入 100 点硬上限；`handeye_abb_bridge_node` 还会在发送前再次拒绝超过 100 点的 PoseArray。
 
 ## 构建
 

@@ -1,4 +1,4 @@
-# x86 焊缝提取算法与 SDK 2.3.0
+# x86 焊缝提取算法与 SDK 2.2.2
 
 本目录是 Ubuntu 22.04 x86_64 上的独立算法工程。它同时生成：
 
@@ -6,7 +6,7 @@
 - `libweld_seam_sdk.so`：供 ROS 2 节点或其他 C++ 程序进程内调用的共享库；
 - 可安装的头文件和 CMake package，外部工程可使用 `find_package(weld_seam_sdk)`。
 
-2.3.0 保留 2.2.2 的红色焊缝、平面提取和四类周期拐点模式，并新增可切换的 `adaptive_contour` 备用路径：直接沿鲁棒红色轮廓离散，直线段稀疏、曲率段密集，抑制点焊/飞溅离群，小孔洞限距插值，大孔洞拒绝输出。默认仍是已经现场使用的 `feature_points`，升级后不会自动改变机器人路径。
+算法主体仍是已经过多批波纹板验证的稳定版本。2.2.2 不改变红色焊缝和平面提取，只增强二次拐点层：严格使用四类周期拓扑、跨越短假线段恢复真实交点，并在帧内已有完整周期证据且预测位置仍位于红色轮廓边界内时补全一个首/末角点。
 
 ## 1. 文件说明
 
@@ -16,7 +16,7 @@
 | `CMakeLists.txt` | 构建 CLI、共享库、安装包和 CMake 导出配置 |
 | `include/weld_seam_sdk/weld_seam_sdk.hpp` | 稳定的 C++ SDK 公共接口 |
 | `config/default.conf` | 全部可运行时修改的算法参数及当前生产默认值 |
-| `参数手册.md` | 86 个运行参数的逐项中文含义、坐标方向和调参顺序 |
+| `参数手册.md` | 69 个运行参数的逐项中文含义、坐标方向和调参顺序 |
 | `cmake/weld_seam_sdkConfig.cmake.in` | 供安装后的 `find_package` 使用 |
 | `build/` | 本机编译目录，可删除后重新生成 |
 | `output/` | 建议保存独立测试结果，不参与编译 |
@@ -37,11 +37,9 @@ flowchart TD
     G --> I
     I --> J["构建工件局部右手坐标系"]
     J --> K["稳定版红色焊缝点提取"]
-    K --> L{"path.mode"}
-    L -->|"feature_points"| M["四类周期拓扑、拐点与安全弦"]
-    L -->|"adaptive_contour"| P["中值轮廓、离群抑制、曲率自适应采样"]
-    M --> N["分类偏置、姿态与安全过渡点"]
-    P --> N
+    K --> L["一维有序轮廓、孔洞桥接、线段拟合"]
+    L --> M["只保留凸左/凸右/凹左/凹右真实拐点"]
+    M --> N["凹角安全弦、位置偏置、姿态与安全过渡点"]
     N --> O["CSV + 精确点 PLY + 粉红十字可视化 PLY"]
 ```
 
@@ -144,20 +142,6 @@ cmake --build build -j"$(nproc)"
   --set offset.protruding_left.x=2.5
 ```
 
-使用同一历史 PLY 对比两种路径模式：
-
-```bash
-# 默认四类拐点路径
-./build/weld_seam_extractor input.ply output corners \
-  --config config/default.conf \
-  --set path.mode=feature_points
-
-# 备用连续轮廓路径；完整轨迹（含两个安全点）不会超过100点
-./build/weld_seam_extractor input.ply output contour \
-  --config config/default.conf \
-  --set path.mode=adaptive_contour
-```
-
 只测试法向策略：
 
 ```bash
@@ -183,9 +167,7 @@ cmake --build build -j"$(nproc)"
 
 粉红色标记由多条线构成，但 CSV 输出坐标是十字中心，不是标记簇中任意一点。
 
-`feature_points` 只输出四类真实焊接拐点：`PROTRUDING_LEFT`、`PROTRUDING_RIGHT`、`RECESSED_LEFT`、`RECESSED_RIGHT`。一般的不完整视野边缘不会制造拐点；仅当同一帧已经提供完整周期、周期预测仍位于红色轮廓范围内且距离首/末轮廓边界不超过 `max_corner_extrapolation` 时才补全一个边界角。
-
-`adaptive_contour` 不要求四类拐点检测完整。其焊接行在 CSV 中标记为 `feature_type=adaptive_contour_point`、`point_source=robust_profile_adaptive_sampling`，姿态源为 `local_contour_tangent`。两种模式都在首尾增加安全过渡点；ROS 节点仍只读取统一的 `x,y,z,qw,qx,qy,qz`，因此手眼与 ABB 协议不变。
+当前路径只输出四类真实焊接拐点：`PROTRUDING_LEFT`、`PROTRUDING_RIGHT`、`RECESSED_LEFT`、`RECESSED_RIGHT`。一般的不完整视野边缘不会制造拐点；仅当同一帧已经提供完整周期、周期预测仍位于红色轮廓范围内且距离首/末轮廓边界不超过 `max_corner_extrapolation` 时，2.2.2 才补全一个边界角。该点在 CSV 的 `point_source` 中标记为 `in_frame_periodic_boundary_completion`。算法随后在第一个和最后一个真实焊接点外增加安全过渡点。
 
 ## 7. 主要可调参数
 
@@ -195,11 +177,9 @@ cmake --build build -j"$(nproc)"
 - `normal.*`：输入法向复用/重算策略、有效率阈值、K 邻域和线程数。
 - `primary.*`：底面/侧面筛选、粗平面搜索体素和侧面原点分位数。
 - `feature.*`：轮廓分箱、线段法向投票、孔洞桥接、线段长度、重复角点合并、安全弦和安全过渡距离。
-- `path.*`：输出模式、直线/曲率点距、鲁棒平滑、空洞安全上限、统一工艺角和最多100点限制。
 - `orientation.*`：四类拐点的工作角/前进角、工具正 Z 轴定义，以及工具 X 使用工件轴或旧角平分线。
 - `offset.start_transition.*`、`offset.end_transition.*`：两个安全过渡点的位置微调。
 - `offset.protruding_left/right.*`、`offset.recessed_left/right.*`：四类真实拐点沿工件局部 XYZ 的位置微调。
-- `offset.adaptive_contour.*`：连续轮廓全部焊接点的统一工件 XYZ 偏置。
 - `visualization.*`：粉红十字半径、枪体方向线长度，只影响校验显示。
 
 ROI 的数值是 PLY/相机坐标系，不是算法内部工件局部坐标系。例如要删除相机 Y 大于 300 mm 的点：
@@ -223,7 +203,7 @@ export LD_LIBRARY_PATH="$HOME/scut_weld_sdk_install/lib:$LD_LIBRARY_PATH"
 其他 CMake 工程的用法：
 
 ```cmake
-find_package(weld_seam_sdk 2.3 CONFIG REQUIRED)
+find_package(weld_seam_sdk 2.2 CONFIG REQUIRED)
 target_link_libraries(your_target PRIVATE weld_seam::sdk)
 ```
 
@@ -235,8 +215,7 @@ options.input_ply = "/data/part.ply";
 options.output_directory = "/data/result";
 options.output_prefix = "part01";
 options.config_file = "/data/default.conf";
-options.parameter_overrides = {
-    "normal.mode=auto", "roi.enable=false", "path.mode=feature_points"};
+options.parameter_overrides = {"normal.mode=auto", "roi.enable=false"};
 const weld_seam_sdk::RunResult result = weld_seam_sdk::run(options);
 ```
 

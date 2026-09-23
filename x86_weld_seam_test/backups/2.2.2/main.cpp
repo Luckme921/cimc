@@ -219,33 +219,6 @@ struct FeatureExtractionParams {
     float visualization_marker_radius = 8.0f;
 };
 
-struct AdaptiveContourParams {
-    // feature_points 保留 2.2.2 的四类拐点路径；adaptive_contour 沿已经
-    // 提取出的红色焊缝轮廓自适应离散，供曲率或制造误差较大的工件使用。
-    std::string mode = "feature_points";
-
-    // 直线段稀疏、转角/曲率段密集。实际点距还会在 max_points 约束下
-    // 等比例放大，绝不会通过截断轨迹来满足 ABB 点数上限。
-    float straight_spacing = 12.0f;
-    float corner_spacing = 4.0f;
-    float corner_influence_radius = 15.0f;
-    float curvature_window = 10.0f;
-    float curvature_threshold_deg = 8.0f;
-
-    // profile bin 本身已使用中值压缩；这里再用小窗口中值识别点焊飞溅等
-    // 局部离群点。连续空洞不超过 max_bridge_gap 时线性跨越，超过则拒绝输出。
-    int smoothing_half_window_bins = 8;
-    float outlier_max_distance = 3.0f;
-    float max_bridge_gap = 15.0f;
-
-    // 包含首末两个安全过渡点。ABB 当前单条轨迹最多保存 100 点。
-    int max_points = 100;
-
-    // 连续轮廓模式使用统一工艺角，局部开放方向由轮廓切线实时计算。
-    float work_angle_deg = 45.0f;
-    float lead_angle_deg = 0.0f;
-};
-
 enum TorchPoseGroup {
     TORCH_PROTRUDING_LEFT = 0,
     TORCH_PROTRUDING_RIGHT = 1,
@@ -325,9 +298,6 @@ struct FeaturePositionOffsetParams {
     WorkpieceOffset3f protruding_right;
     WorkpieceOffset3f recessed_left;
     WorkpieceOffset3f recessed_right;
-    // adaptive_contour 模式的全部焊接采样点使用同一组连续偏置，避免在
-    // 四类拐点边界发生毫米级阶跃；安全过渡点在此基础上再加首/末微调。
-    WorkpieceOffset3f adaptive_contour;
 };
 
 struct SeamProfileSample {
@@ -389,7 +359,6 @@ struct WeldFeaturePoint {
     CornerTopologyState topology_state;
     float detection_score;
     bool topology_inferred;
-    bool is_contour_sample = false;
 };
 
 static float medianOf(std::vector<float> values)
@@ -1658,409 +1627,6 @@ static std::vector<WeldFeaturePoint> extractOrderedWeldFeatures(
     return ordered_features;
 }
 
-struct AdaptiveProfilePoint {
-    Eigen::Vector3f local;
-    float arc_length;
-    float corner_distance;
-};
-
-static std::vector<SeamProfileBin> filterAdaptiveProfile(
-    const std::vector<SeamProfileBin>& input,
-    const AdaptiveContourParams& params,
-    float& largest_gap)
-{
-    std::vector<SeamProfileBin> filtered = input;
-    largest_gap = 0.0f;
-    for (size_t i = 1; i < input.size(); ++i) {
-        largest_gap = std::max(
-            largest_gap, input[i].local_x - input[i - 1].local_x);
-    }
-
-    // 只替换明显偏离邻域中值的单点/短飞溅，不对正常轮廓做大窗口平滑，
-    // 因而不会把真实圆角或板材曲率压平成理论梯形。
-    for (size_t i = 0; i < input.size(); ++i) {
-        const int first = std::max(
-            0, static_cast<int>(i) - params.smoothing_half_window_bins);
-        const int last = std::min(
-            static_cast<int>(input.size()) - 1,
-            static_cast<int>(i) + params.smoothing_half_window_bins);
-        std::vector<float> ys;
-        std::vector<float> zs;
-        ys.reserve(static_cast<size_t>(last - first + 1));
-        zs.reserve(static_cast<size_t>(last - first + 1));
-        for (int j = first; j <= last; ++j) {
-            // 不跨越不可接受的大孔洞借用另一侧数据。
-            if (std::abs(input[static_cast<size_t>(j)].local_x - input[i].local_x) >
-                params.max_bridge_gap) {
-                continue;
-            }
-            ys.push_back(input[static_cast<size_t>(j)].local_y);
-            zs.push_back(input[static_cast<size_t>(j)].local_z);
-        }
-        if (ys.empty()) continue;
-        const float median_y = medianOf(ys);
-        const float median_z = medianOf(zs);
-        const float dy = input[i].local_y - median_y;
-        const float dz = input[i].local_z - median_z;
-        if (std::sqrt(dy * dy + dz * dz) > params.outlier_max_distance) {
-            filtered[i].local_y = median_y;
-            filtered[i].local_z = median_z;
-        }
-    }
-
-    // 第二级小窗口中值用于消除红色焊缝带厚度造成的逐 bin 抖动。窗口只有
-    // 数毫米，保留真实圆角/板材曲率，同时让后续位姿切线连续可执行。
-    std::vector<SeamProfileBin> smoothed = filtered;
-    for (size_t i = 0; i < filtered.size(); ++i) {
-        const int first = std::max(
-            0, static_cast<int>(i) - params.smoothing_half_window_bins);
-        const int last = std::min(
-            static_cast<int>(filtered.size()) - 1,
-            static_cast<int>(i) + params.smoothing_half_window_bins);
-        std::vector<float> ys;
-        std::vector<float> zs;
-        for (int j = first; j <= last; ++j) {
-            if (std::abs(filtered[static_cast<size_t>(j)].local_x -
-                         filtered[i].local_x) > params.max_bridge_gap) {
-                continue;
-            }
-            ys.push_back(filtered[static_cast<size_t>(j)].local_y);
-            zs.push_back(filtered[static_cast<size_t>(j)].local_z);
-        }
-        if (!ys.empty()) {
-            smoothed[i].local_y = medianOf(ys);
-            smoothed[i].local_z = medianOf(zs);
-        }
-    }
-    return smoothed;
-}
-
-static float adaptiveTurnAngleDeg(
-    const std::vector<AdaptiveProfilePoint>& profile,
-    size_t index,
-    float window)
-{
-    if (index == 0 || index + 1 >= profile.size()) return 0.0f;
-    size_t left = index;
-    while (left > 0 &&
-           profile[index].arc_length - profile[left].arc_length < window) {
-        --left;
-    }
-    size_t right = index;
-    while (right + 1 < profile.size() &&
-           profile[right].arc_length - profile[index].arc_length < window) {
-        ++right;
-    }
-    if (left == index || right == index) return 0.0f;
-
-    Eigen::Vector2f incoming =
-        profile[index].local.head<2>() - profile[left].local.head<2>();
-    Eigen::Vector2f outgoing =
-        profile[right].local.head<2>() - profile[index].local.head<2>();
-    if (!incoming.allFinite() || !outgoing.allFinite() ||
-        incoming.norm() < 1e-5f || outgoing.norm() < 1e-5f) {
-        return 0.0f;
-    }
-    incoming.normalize();
-    outgoing.normalize();
-    const float dot = std::max(-1.0f, std::min(1.0f, incoming.dot(outgoing)));
-    return std::acos(dot) * static_cast<float>(180.0 / 3.14159265358979323846);
-}
-
-static float interpolateProfileScalar(
-    const std::vector<AdaptiveProfilePoint>& profile,
-    float arc,
-    bool corner_distance)
-{
-    if (profile.empty()) return 0.0f;
-    if (arc <= 0.0f) {
-        return corner_distance ? profile.front().corner_distance : 0.0f;
-    }
-    if (arc >= profile.back().arc_length) {
-        return corner_distance ? profile.back().corner_distance : 0.0f;
-    }
-    const auto upper = std::upper_bound(
-        profile.begin(), profile.end(), arc,
-        [](float value, const AdaptiveProfilePoint& point) {
-            return value < point.arc_length;
-        });
-    const size_t right = static_cast<size_t>(upper - profile.begin());
-    const size_t left = right - 1;
-    const float span = profile[right].arc_length - profile[left].arc_length;
-    const float alpha = span > 1e-6f
-        ? (arc - profile[left].arc_length) / span : 0.0f;
-    if (corner_distance) {
-        return (1.0f - alpha) * profile[left].corner_distance +
-            alpha * profile[right].corner_distance;
-    }
-    return alpha;
-}
-
-static Eigen::Vector3f interpolateAdaptiveLocal(
-    const std::vector<AdaptiveProfilePoint>& profile,
-    float arc,
-    float slope_window,
-    float& local_slope)
-{
-    if (arc <= 0.0f) arc = 0.0f;
-    if (arc >= profile.back().arc_length) arc = profile.back().arc_length;
-    const auto upper = std::upper_bound(
-        profile.begin(), profile.end(), arc,
-        [](float value, const AdaptiveProfilePoint& point) {
-            return value < point.arc_length;
-        });
-    size_t right = static_cast<size_t>(upper - profile.begin());
-    if (right == 0) right = 1;
-    if (right >= profile.size()) right = profile.size() - 1;
-    const size_t left = right - 1;
-    const float span = profile[right].arc_length - profile[left].arc_length;
-    const float alpha = span > 1e-6f
-        ? (arc - profile[left].arc_length) / span : 0.0f;
-    const Eigen::Vector3f local =
-        (1.0f - alpha) * profile[left].local + alpha * profile[right].local;
-    // 姿态切线不能由相邻 0.8mm bin 决定，否则焊缝带厚度和点焊毛刺会被
-    // 放大成几十度滚转。用当前点前后固定弧长窗口做最小二乘直线拟合。
-    double mean_x = 0.0;
-    double mean_y = 0.0;
-    size_t fit_count = 0;
-    for (const AdaptiveProfilePoint& point : profile) {
-        if (std::abs(point.arc_length - arc) <= slope_window) {
-            mean_x += point.local.x();
-            mean_y += point.local.y();
-            ++fit_count;
-        }
-    }
-    if (fit_count >= 2) {
-        mean_x /= static_cast<double>(fit_count);
-        mean_y /= static_cast<double>(fit_count);
-        double covariance = 0.0;
-        double variance = 0.0;
-        for (const AdaptiveProfilePoint& point : profile) {
-            if (std::abs(point.arc_length - arc) > slope_window) continue;
-            const double dx = static_cast<double>(point.local.x()) - mean_x;
-            covariance += dx * (static_cast<double>(point.local.y()) - mean_y);
-            variance += dx * dx;
-        }
-        local_slope = variance > 1e-8
-            ? static_cast<float>(covariance / variance) : 0.0f;
-    } else {
-        const float dx = profile[right].local.x() - profile[left].local.x();
-        local_slope = std::abs(dx) > 1e-6f
-            ? (profile[right].local.y() - profile[left].local.y()) / dx : 0.0f;
-    }
-    return local;
-}
-
-static std::vector<float> makeAdaptiveSampleArcs(
-    const std::vector<AdaptiveProfilePoint>& profile,
-    const AdaptiveContourParams& params,
-    float spacing_scale)
-{
-    std::vector<float> arcs;
-    const float total = profile.back().arc_length;
-    arcs.push_back(0.0f);
-    float current = 0.0f;
-    while (current < total - 1e-4f) {
-        const float distance_to_corner = interpolateProfileScalar(
-            profile, current, true);
-        const float blend = params.corner_influence_radius > 1e-6f
-            ? std::max(0.0f, std::min(
-                1.0f, distance_to_corner / params.corner_influence_radius))
-            : 1.0f;
-        const float base_spacing = params.corner_spacing +
-            blend * (params.straight_spacing - params.corner_spacing);
-        const float spacing = std::max(0.25f, spacing_scale * base_spacing);
-        const float next = std::min(total, current + spacing);
-        if (next <= current + 1e-5f) break;
-        if (next >= total - 1e-4f &&
-            total - current < 0.75f * spacing_scale * params.corner_spacing &&
-            arcs.size() > 1) {
-            // 不在路径末端留下 1~2mm 的几乎重复点；用真实末端替换上一个
-            // 采样点，保持轮廓完整且不增加机器人无意义的极短 MoveL。
-            arcs.back() = total;
-            current = total;
-            break;
-        }
-        arcs.push_back(next);
-        current = next;
-    }
-    if (arcs.back() < total - 1e-4f) arcs.push_back(total);
-    return arcs;
-}
-
-static std::vector<WeldFeaturePoint> extractAdaptiveContourPath(
-    const pcl::PointCloud<PointInT>::ConstPtr& cloud,
-    const std::vector<bool>& is_final_seam,
-    const Eigen::Vector3f& n_bottom,
-    float d_bottom,
-    const Eigen::Vector3f& n_side,
-    float d_side,
-    const Eigen::Vector3f& n_tangent,
-    const FeatureExtractionParams& feature_params,
-    const AdaptiveContourParams& params,
-    std::string& error)
-{
-    std::vector<WeldFeaturePoint> result;
-    const std::vector<SeamProfileSample> samples = collectSeamProfileSamples(
-        cloud, is_final_seam, n_bottom, d_bottom, n_side, d_side,
-        n_tangent, feature_params);
-    if (samples.size() < 2) {
-        error = "adaptive contour: too few red seam points";
-        return result;
-    }
-    std::vector<SeamProfileBin> bins = buildProfileBins(samples, feature_params);
-    if (bins.size() < 3) {
-        error = "adaptive contour: too few robust profile bins";
-        return result;
-    }
-
-    float largest_gap = 0.0f;
-    bins = filterAdaptiveProfile(bins, params, largest_gap);
-    if (largest_gap > params.max_bridge_gap) {
-        std::ostringstream stream;
-        stream << "adaptive contour: profile gap " << largest_gap
-               << " mm exceeds path.max_bridge_gap="
-               << params.max_bridge_gap << " mm";
-        error = stream.str();
-        return result;
-    }
-
-    std::vector<AdaptiveProfilePoint> profile;
-    profile.reserve(bins.size());
-    for (size_t i = 0; i < bins.size(); ++i) {
-        AdaptiveProfilePoint point;
-        point.local = Eigen::Vector3f(
-            bins[i].local_x, bins[i].local_y, bins[i].local_z);
-        point.arc_length = 0.0f;
-        point.corner_distance = std::numeric_limits<float>::infinity();
-        if (!profile.empty()) {
-            // 焊缝位于底板平面附近，密度控制只按轮廓 XY 弧长计算，避免法向
-            // 或点焊造成的微小 Z 抖动虚增路径长度。
-            point.arc_length = profile.back().arc_length +
-                (point.local.head<2>() - profile.back().local.head<2>()).norm();
-        }
-        profile.push_back(point);
-    }
-    if (profile.back().arc_length < 1.0f) {
-        error = "adaptive contour: usable contour is shorter than 1 mm";
-        return result;
-    }
-
-    size_t curvature_bin_count = 0;
-    for (size_t i = 0; i < profile.size(); ++i) {
-        if (adaptiveTurnAngleDeg(profile, i, params.curvature_window) >=
-            params.curvature_threshold_deg) {
-            profile[i].corner_distance = 0.0f;
-            ++curvature_bin_count;
-        }
-    }
-    // 没有明显转角时全程按直线间距；否则两次扫描得到每个 profile bin
-    // 到最近曲率区的真实弧长距离。
-    if (curvature_bin_count > 0) {
-        float distance = std::numeric_limits<float>::infinity();
-        for (size_t i = 0; i < profile.size(); ++i) {
-            if (profile[i].corner_distance == 0.0f) distance = 0.0f;
-            else if (i > 0 && std::isfinite(distance)) {
-                distance += profile[i].arc_length - profile[i - 1].arc_length;
-            }
-            profile[i].corner_distance = std::min(
-                profile[i].corner_distance, distance);
-        }
-        distance = std::numeric_limits<float>::infinity();
-        for (size_t i = profile.size(); i-- > 0;) {
-            if (profile[i].corner_distance == 0.0f) distance = 0.0f;
-            else if (i + 1 < profile.size() && std::isfinite(distance)) {
-                distance += profile[i + 1].arc_length - profile[i].arc_length;
-            }
-            profile[i].corner_distance = std::min(
-                profile[i].corner_distance, distance);
-        }
-    } else {
-        for (AdaptiveProfilePoint& point : profile) {
-            point.corner_distance = params.corner_influence_radius;
-        }
-    }
-
-    const size_t weld_budget = static_cast<size_t>(params.max_points - 2);
-    float spacing_scale = 1.0f;
-    std::vector<float> sample_arcs = makeAdaptiveSampleArcs(
-        profile, params, spacing_scale);
-    for (int iteration = 0;
-         sample_arcs.size() > weld_budget && iteration < 32; ++iteration) {
-        const float ratio = static_cast<float>(sample_arcs.size()) /
-            static_cast<float>(weld_budget);
-        spacing_scale *= std::max(1.05f, ratio * 1.01f);
-        sample_arcs = makeAdaptiveSampleArcs(profile, params, spacing_scale);
-    }
-    if (sample_arcs.size() > weld_budget) {
-        error = "adaptive contour: cannot satisfy path.max_points without truncation";
-        return result;
-    }
-
-    std::vector<float> all_y;
-    all_y.reserve(profile.size());
-    for (const AdaptiveProfilePoint& point : profile) {
-        all_y.push_back(point.local.y());
-    }
-    const float depth_split = medianOf(all_y);
-
-    std::vector<WeldFeaturePoint> weld_points;
-    weld_points.reserve(sample_arcs.size());
-    for (float arc : sample_arcs) {
-        float slope = 0.0f;
-        WeldFeaturePoint feature = {};
-        feature.local = interpolateAdaptiveLocal(
-            profile, arc, params.curvature_window, slope);
-        feature.world = localToWorld(
-            feature.local.x(), feature.local.y(), feature.local.z(),
-            n_bottom, d_bottom, n_side, d_side, n_tangent);
-        feature.is_transition_point = false;
-        feature.is_start_transition = false;
-        feature.protruding = feature_params.protruding_is_larger_local_y
-            ? feature.local.y() >= depth_split : feature.local.y() <= depth_split;
-        feature.measured_on_arc = true;
-        feature.distance_to_ideal = 0.0f;
-        feature.merged_detection_count = 1;
-        feature.left_line_slope = slope;
-        feature.right_line_slope = slope;
-        feature.ideal_local = feature.local;
-        feature.left_segment = classifyProfileSlope(slope, feature_params);
-        feature.right_segment = feature.left_segment;
-        feature.topology_state = CORNER_TOPOLOGY_UNKNOWN;
-        feature.detection_score = interpolateProfileScalar(profile, arc, true);
-        feature.topology_inferred = false;
-        feature.is_contour_sample = true;
-        weld_points.push_back(feature);
-    }
-    if (weld_points.size() < 2) {
-        error = "adaptive contour: fewer than two weld samples were generated";
-        return result;
-    }
-
-    result.reserve(weld_points.size() + 2);
-    result.push_back(makeSafeTransitionPoint(
-        weld_points.front(), true,
-        feature_params.safe_transition_offset_y,
-        feature_params.safe_transition_offset_z,
-        n_bottom, d_bottom, n_side, d_side, n_tangent));
-    result.insert(result.end(), weld_points.begin(), weld_points.end());
-    result.push_back(makeSafeTransitionPoint(
-        weld_points.back(), false,
-        feature_params.safe_transition_offset_y,
-        feature_params.safe_transition_offset_z,
-        n_bottom, d_bottom, n_side, d_side, n_tangent));
-
-    std::cout << "Adaptive contour profile: red_points=" << samples.size()
-        << ", bins=" << bins.size()
-        << ", length=" << profile.back().arc_length << " mm"
-        << ", curvature_bins=" << curvature_bin_count
-        << ", largest_gap=" << largest_gap << " mm"
-        << ", spacing_scale=" << spacing_scale
-        << ", weld_samples=" << weld_points.size()
-        << ", total_path_points=" << result.size() << std::endl;
-    return result;
-}
-
 static const char* segmentTypeName(SeamSegmentType type)
 {
     if (type == SEGMENT_FLAT) return "flat";
@@ -2324,21 +1890,14 @@ static std::vector<WeldPoseData> buildOrderedWeldPoses(
         if (assigned[i]) continue;
         if (!corner_indices.empty()) {
             size_t nearest_corner = corner_indices.front();
-            if (features[i].is_transition_point) {
-                // 安全点由首/末焊接点生成，必须继承该相邻点姿态。按三维距离
-                // 搜索可能在波纹折返处误选另一条近邻边，造成无意义姿态跳变。
-                nearest_corner = features[i].is_start_transition
-                    ? corner_indices.front() : corner_indices.back();
-            } else {
-                float nearest_distance_squared = std::numeric_limits<float>::max();
-                for (size_t j = 0; j < corner_indices.size(); ++j) {
-                    const size_t candidate = corner_indices[j];
-                    const Eigen::Vector2f delta =
-                        features[candidate].local.head<2>() - features[i].local.head<2>();
-                    if (delta.squaredNorm() < nearest_distance_squared) {
-                        nearest_distance_squared = delta.squaredNorm();
-                        nearest_corner = candidate;
-                    }
+            float nearest_distance_squared = std::numeric_limits<float>::max();
+            for (size_t j = 0; j < corner_indices.size(); ++j) {
+                const size_t candidate = corner_indices[j];
+                const Eigen::Vector2f delta =
+                    features[candidate].local.head<2>() - features[i].local.head<2>();
+                if (delta.squaredNorm() < nearest_distance_squared) {
+                    nearest_distance_squared = delta.squaredNorm();
+                    nearest_corner = candidate;
                 }
             }
             poses[i] = poses[nearest_corner];
@@ -2392,8 +1951,7 @@ static bool validateFeaturePositionOffsets(
         isFiniteWorkpieceOffset(params.protruding_left) &&
         isFiniteWorkpieceOffset(params.protruding_right) &&
         isFiniteWorkpieceOffset(params.recessed_left) &&
-        isFiniteWorkpieceOffset(params.recessed_right) &&
-        isFiniteWorkpieceOffset(params.adaptive_contour);
+        isFiniteWorkpieceOffset(params.recessed_right);
 }
 
 static bool validateFeatureExtractionParams(
@@ -2471,65 +2029,13 @@ static bool validateFeatureExtractionParams(
     return true;
 }
 
-static bool validateAdaptiveContourParams(
-    const AdaptiveContourParams& params,
-    std::string& error)
-{
-    auto fail = [&error](const char* message) {
-        error = message;
-        return false;
-    };
-    if (params.mode != "feature_points" &&
-        params.mode != "adaptive_contour") {
-        return fail("path.mode must be feature_points or adaptive_contour.");
-    }
-    if (!std::isfinite(params.straight_spacing) ||
-        !std::isfinite(params.corner_spacing) ||
-        params.straight_spacing <= 0.0f || params.corner_spacing <= 0.0f ||
-        params.corner_spacing > params.straight_spacing) {
-        return fail("path spacing must satisfy 0 < corner_spacing <= straight_spacing.");
-    }
-    if (!std::isfinite(params.corner_influence_radius) ||
-        !std::isfinite(params.curvature_window) ||
-        params.corner_influence_radius < 0.0f ||
-        params.curvature_window <= 0.0f) {
-        return fail("path corner influence/window values are invalid.");
-    }
-    if (!std::isfinite(params.curvature_threshold_deg) ||
-        params.curvature_threshold_deg <= 0.0f ||
-        params.curvature_threshold_deg >= 180.0f) {
-        return fail("path.curvature_threshold_deg must be within (0, 180).");
-    }
-    if (params.smoothing_half_window_bins < 1 ||
-        params.smoothing_half_window_bins > 100) {
-        return fail("path.smoothing_half_window_bins must be within [1, 100].");
-    }
-    if (!std::isfinite(params.outlier_max_distance) ||
-        params.outlier_max_distance <= 0.0f ||
-        !std::isfinite(params.max_bridge_gap) ||
-        params.max_bridge_gap <= 0.0f) {
-        return fail("path outlier/gap limits must be finite and > 0.");
-    }
-    if (params.max_points < 4 || params.max_points > 100) {
-        return fail("path.max_points must be within [4, 100] including transitions.");
-    }
-    if (!std::isfinite(params.work_angle_deg) ||
-        params.work_angle_deg <= 0.0f || params.work_angle_deg >= 90.0f ||
-        !std::isfinite(params.lead_angle_deg) ||
-        std::abs(params.lead_angle_deg) >= 85.0f) {
-        return fail("adaptive path work/lead angles are outside the safe numeric range.");
-    }
-    return true;
-}
-
 static WorkpieceOffset3f selectFeaturePositionOffset(
     const WeldFeaturePoint& feature,
     const WeldPoseData& pose,
     const FeaturePositionOffsetParams& params)
 {
     WorkpieceOffset3f offset;
-    if (feature.is_contour_sample) offset = params.adaptive_contour;
-    else if (pose.group == TORCH_PROTRUDING_LEFT) offset = params.protruding_left;
+    if (pose.group == TORCH_PROTRUDING_LEFT) offset = params.protruding_left;
     else if (pose.group == TORCH_PROTRUDING_RIGHT) offset = params.protruding_right;
     else if (pose.group == TORCH_RECESSED_LEFT) offset = params.recessed_left;
     else offset = params.recessed_right;
@@ -2553,7 +2059,6 @@ static const char* featurePositionOffsetGroupName(
     if (feature.is_transition_point) {
         return feature.is_start_transition ? "start_transition" : "end_transition";
     }
-    if (feature.is_contour_sample) return "adaptive_contour";
     return torchPoseGroupName(pose.group);
 }
 
@@ -2637,9 +2142,6 @@ static bool saveFeatureCsv(
             feature_type = feature.is_start_transition
                 ? "start_transition" : "end_transition";
             point_source = "generated_safe_transition";
-        } else if (feature.is_contour_sample) {
-            feature_type = "adaptive_contour_point";
-            point_source = "robust_profile_adaptive_sampling";
         } else {
             // 与四组姿态/位置偏置使用完全相同的物理分类名称，机械臂端无需
             // 再根据凹凸和腰线方向进行二次推断。
@@ -2657,9 +2159,7 @@ static bool saveFeatureCsv(
         const char* pose_source = pose.default_without_corner
             ? "default_no_corner"
             : (pose.inherited_from_nearest_corner
-                ? "inherited_nearest_corner"
-                : (feature.is_contour_sample
-                    ? "local_contour_tangent" : "corner_geometry"));
+                ? "inherited_nearest_corner" : "corner_geometry");
         const float orientation_delta = i == 0
             ? 0.0f : quaternionAngularDistanceDeg(poses[i - 1], pose);
         output << i << ','
@@ -3135,7 +2635,7 @@ static int executeWeldSeamExtraction(
     int normal_k_neighbors = 20;
     unsigned int normal_thread_count = 0;
 
-    // 3. 七组最终位置偏置（单位 mm），全部沿“工件右手坐标系”施加：
+    // 3. 六组最终位置偏置（单位 mm），全部沿“工件右手坐标系”施加：
     // +X = 焊缝 CSV 前进方向；+Y = 朝 L 侧板/开放侧；+Z = 离开蓝色底板向上。
     // 偏置不参与焊缝提取和凹凸判断，只改变最终 CSV、精确点 PLY 与粉红十字位置。
     // 每组独立生效，不要求当前视野必须拍到一个完整的四角波纹周期。
@@ -3164,10 +2664,6 @@ static int executeWeldSeamExtraction(
     position_offsets.recessed_right.x = 0.0f;
     position_offsets.recessed_right.y = 1.0f;
     position_offsets.recessed_right.z = 0.0f;
-    // 连续轮廓模式默认不增加额外位置偏置，直接跟随鲁棒红色焊缝轮廓。
-    position_offsets.adaptive_contour.x = 0.0f;
-    position_offsets.adaptive_contour.y = 0.0f;
-    position_offsets.adaptive_contour.z = 0.0f;
 
     // 4. Z向(高度)滤波阈值：L形底面高度为 0。剔除低于此阈值的候选点。
     // 直焊缝通常低于波纹焊缝。如果直焊缝有残留，可慢慢调大 (如 0.0f, 0.5f)
@@ -3193,11 +2689,7 @@ static int executeWeldSeamExtraction(
     feature_params.safe_transition_offset_y = 20.0f;
     feature_params.safe_transition_offset_z = 20.0f;
 
-    // 8. 路径输出模式。默认 feature_points 完全保留 2.2.2 行为；切换为
-    // adaptive_contour 后，沿红色焊缝轮廓按曲率自适应离散，且总点数硬限100。
-    AdaptiveContourParams adaptive_params;
-
-    // 9. 焊枪姿态参数：四组分别对应“凸角左腰、凸角右腰、凹角左腰、凹角右腰”。
+    // 8. 焊枪姿态参数：四组分别对应“凸角左腰、凸角右腰、凹角左腰、凹角右腰”。
     // 左/右腰按 CSV 前进方向下 local_y 斜率的正/负定义，不依赖相机画面的左右方向。
     // work_angle 是枪体中心轴与蓝色底板平面的夹角，默认全部45°；若凹角处枪头
     // 外壳容易碰波纹板，可在仿真/低速验证后适当增大对应 recessed 角度，使枪体更竖直。
@@ -3288,19 +2780,6 @@ static int executeWeldSeamExtraction(
     APPLY_BOOL("feature.protruding_is_larger_local_y", feature_params.protruding_is_larger_local_y);
     APPLY_FLOAT("visualization.marker_radius", feature_params.visualization_marker_radius);
 
-    APPLY_STRING("path.mode", adaptive_params.mode);
-    APPLY_FLOAT("path.straight_spacing", adaptive_params.straight_spacing);
-    APPLY_FLOAT("path.corner_spacing", adaptive_params.corner_spacing);
-    APPLY_FLOAT("path.corner_influence_radius", adaptive_params.corner_influence_radius);
-    APPLY_FLOAT("path.curvature_window", adaptive_params.curvature_window);
-    APPLY_FLOAT("path.curvature_threshold_deg", adaptive_params.curvature_threshold_deg);
-    APPLY_INT("path.smoothing_half_window_bins", adaptive_params.smoothing_half_window_bins);
-    APPLY_FLOAT("path.outlier_max_distance", adaptive_params.outlier_max_distance);
-    APPLY_FLOAT("path.max_bridge_gap", adaptive_params.max_bridge_gap);
-    APPLY_INT("path.max_points", adaptive_params.max_points);
-    APPLY_FLOAT("path.work_angle_deg", adaptive_params.work_angle_deg);
-    APPLY_FLOAT("path.lead_angle_deg", adaptive_params.lead_angle_deg);
-
     APPLY_FLOAT("orientation.protruding_left.work_angle_deg", torch_params.protruding_left_work_angle_deg);
     APPLY_FLOAT("orientation.protruding_right.work_angle_deg", torch_params.protruding_right_work_angle_deg);
     APPLY_FLOAT("orientation.recessed_left.work_angle_deg", torch_params.recessed_left_work_angle_deg);
@@ -3324,7 +2803,6 @@ static int executeWeldSeamExtraction(
     APPLY_OFFSET("protruding_right", protruding_right);
     APPLY_OFFSET("recessed_left", recessed_left);
     APPLY_OFFSET("recessed_right", recessed_right);
-    APPLY_OFFSET("adaptive_contour", adaptive_contour);
 
 #undef APPLY_OFFSET
 #undef APPLY_BOOL
@@ -3340,7 +2818,6 @@ static int executeWeldSeamExtraction(
     }
 
     torch_params.tool_x_reference = lowerText(torch_params.tool_x_reference);
-    adaptive_params.mode = lowerText(adaptive_params.mode);
     if (!validateTorchOrientationParams(torch_params)) {
         run_result.message =
             "Invalid torch orientation: work angles must be within (0, 90), "
@@ -3356,11 +2833,6 @@ static int executeWeldSeamExtraction(
         return -1;
     }
     if (!validateFeatureExtractionParams(feature_params, parameter_error)) {
-        run_result.message = parameter_error;
-        std::cerr << run_result.message << std::endl;
-        return -1;
-    }
-    if (!validateAdaptiveContourParams(adaptive_params, parameter_error)) {
         run_result.message = parameter_error;
         std::cerr << run_result.message << std::endl;
         return -1;
@@ -3952,46 +3424,18 @@ static int executeWeldSeamExtraction(
     const std::chrono::steady_clock::time_point primary_end_time =
         std::chrono::steady_clock::now();
 
-    // 6.1 两种路径模式都只消费上面已经稳定得到的红色焊缝点。
-    // feature_points 保留四类拐点；adaptive_contour 沿真实轮廓自适应离散。
+    // 6.1 只消费上面已经稳定得到的红色点，提取有序折线拐点。
     const std::chrono::steady_clock::time_point feature_start_time =
         std::chrono::steady_clock::now();
-    std::vector<WeldFeaturePoint> feature_points;
-    std::string path_error;
-    if (adaptive_params.mode == "adaptive_contour") {
-        feature_points = extractAdaptiveContourPath(
-            cloud_filtered, is_final_seam,
-            N_bottom, D_bottom, N_side, D_side, N_tangent,
-            feature_params, adaptive_params, path_error);
-        if (!path_error.empty()) {
-            run_result.message = path_error;
-            std::cerr << run_result.message << std::endl;
-            return -1;
-        }
-    } else {
-        feature_points = extractOrderedWeldFeatures(
-            cloud_filtered, is_final_seam,
-            N_bottom, D_bottom, N_side, D_side, N_tangent, feature_params);
-    }
+    std::vector<WeldFeaturePoint> feature_points = extractOrderedWeldFeatures(
+        cloud_filtered, is_final_seam,
+        N_bottom, D_bottom, N_side, D_side, N_tangent, feature_params);
 
     // 在 PLY 世界坐标系中生成每个点的焊枪姿态。Tool Z 使用局部开放侧
     // 角平分避让，Tool X 默认以工件焊接前进方向为参考；首末安全过渡点
     // 继承距离最近的内部角点姿态。
-    TorchOrientationParams path_torch_params = torch_params;
-    if (adaptive_params.mode == "adaptive_contour") {
-        // 连续模式每个点的 left/right slope 都是该处的局部轮廓切线；四组角度
-        // 统一为连续路径工艺角，避免分类边界产生姿态阶跃。
-        path_torch_params.protruding_left_work_angle_deg = adaptive_params.work_angle_deg;
-        path_torch_params.protruding_right_work_angle_deg = adaptive_params.work_angle_deg;
-        path_torch_params.recessed_left_work_angle_deg = adaptive_params.work_angle_deg;
-        path_torch_params.recessed_right_work_angle_deg = adaptive_params.work_angle_deg;
-        path_torch_params.protruding_left_lead_angle_deg = adaptive_params.lead_angle_deg;
-        path_torch_params.protruding_right_lead_angle_deg = adaptive_params.lead_angle_deg;
-        path_torch_params.recessed_left_lead_angle_deg = adaptive_params.lead_angle_deg;
-        path_torch_params.recessed_right_lead_angle_deg = adaptive_params.lead_angle_deg;
-    }
     const std::vector<WeldPoseData> feature_poses = buildOrderedWeldPoses(
-        feature_points, N_bottom, N_side, N_tangent, path_torch_params);
+        feature_points, N_bottom, N_side, N_tangent, torch_params);
 
     // 提取、排序、凹凸分类和姿态生成完成后，才按点类型施加工件坐标偏置。
     // 因此不完整周期、视野截断和某一类角点缺失都不会影响其余点的偏置选择。
@@ -4088,7 +3532,7 @@ static int executeWeldSeamExtraction(
     // 机械臂使用的是真实、精确、已经按 local_x 连续排序的单点集合。
     if (!saveFeatureCsv(
             run_result.csv_path, feature_points, feature_poses,
-            path_torch_params, position_offsets, workpiece_x_origin_projection)) {
+            torch_params, position_offsets, workpiece_x_origin_projection)) {
         run_result.message = "Failed to write feature CSV: " + run_result.csv_path;
         std::cerr << run_result.message << std::endl;
         return -1;
@@ -4111,7 +3555,7 @@ static int executeWeldSeamExtraction(
         N_bottom, N_side, N_tangent, feature_params.visualization_marker_radius);
     appendTorchBodyAxisMarkers(
         *final_cloud, feature_points, feature_poses,
-        path_torch_params.visualization_body_axis_length_mm);
+        torch_params.visualization_body_axis_length_mm);
     if (pcl::io::savePLYFileBinary(
             run_result.visualization_ply_path, *final_cloud) != 0) {
         run_result.message =
@@ -4140,7 +3584,6 @@ static int executeWeldSeamExtraction(
     int measured_recessed_count = 0;
     int inferred_recessed_count = 0;
     int transition_count = 0;
-    int contour_sample_count = 0;
     float maximum_orientation_step_deg = 0.0f;
     for (size_t i = 0; i < feature_points.size(); ++i) {
         const WeldFeaturePoint& feature = feature_points[i];
@@ -4148,7 +3591,6 @@ static int executeWeldSeamExtraction(
         const WorkpieceOffset3f applied_offset =
             selectFeaturePositionOffset(feature, pose, position_offsets);
         if (feature.is_transition_point) ++transition_count;
-        else if (feature.is_contour_sample) ++contour_sample_count;
         else if (feature.protruding) ++protruding_count;
         else if (feature.measured_on_arc) ++measured_recessed_count;
         else ++inferred_recessed_count;
@@ -4159,9 +3601,6 @@ static int executeWeldSeamExtraction(
             feature_name = feature.is_start_transition
                 ? "START_TRANSITION" : "END_TRANSITION";
             source_name = "generated safe transition";
-        } else if (feature.is_contour_sample) {
-            feature_name = "ADAPTIVE_CONTOUR_POINT";
-            source_name = "robust profile adaptive sampling";
         } else {
             feature_name = feature.protruding ? "PROTRUDING_CORNER" : "RECESSED_CORNER";
             if (feature.topology_inferred) {
@@ -4180,9 +3619,7 @@ static int executeWeldSeamExtraction(
         const char* pose_source = pose.default_without_corner
             ? "default_no_corner"
             : (pose.inherited_from_nearest_corner
-                ? "inherited_nearest_corner"
-                : (feature.is_contour_sample
-                    ? "local_contour_tangent" : "corner_geometry"));
+                ? "inherited_nearest_corner" : "corner_geometry");
         const float orientation_delta = i == 0
             ? 0.0f : quaternionAngularDistanceDeg(feature_poses[i - 1], pose);
         maximum_orientation_step_deg = std::max(
@@ -4221,21 +3658,13 @@ static int executeWeldSeamExtraction(
     }
     std::cout << "Ordered robot path points: " << feature_points.size()
         << " (safe transitions=" << transition_count
-        << ", adaptive contour samples=" << contour_sample_count
         << ", protruding corners=" << protruding_count
         << ", recessed measured corners=" << measured_recessed_count
         << ", recessed safe fallbacks=" << inferred_recessed_count << ")" << std::endl;
-    if (adaptive_params.mode == "adaptive_contour") {
-        std::cout << "Adaptive contour weld samples: "
-            << contour_sample_count << " (path.max_points="
-            << adaptive_params.max_points << ", including transitions)" << std::endl;
-    } else {
-        std::cout << "Four-type weld feature points: "
-            << (feature_points.size() >= static_cast<size_t>(transition_count)
-                ? feature_points.size() - static_cast<size_t>(transition_count) : 0)
-            << std::endl;
-    }
-    std::cout << "Path mode: " << adaptive_params.mode << std::endl;
+    std::cout << "Four-type weld feature points: "
+        << (feature_points.size() >= static_cast<size_t>(transition_count)
+            ? feature_points.size() - static_cast<size_t>(transition_count) : 0)
+        << std::endl;
     std::cout << "Configured safe transition workpiece offsets: X=0 mm, Y=+"
         << feature_params.safe_transition_offset_y << " mm, Z=+"
         << feature_params.safe_transition_offset_z << " mm" << std::endl;
@@ -4250,23 +3679,23 @@ static int executeWeldSeamExtraction(
         << N_bottom.z() << ")" << std::endl;
     std::cout << "Quaternion columns: qw/qx/qy/qz are PLY world_from_tool; "
                  "workpiece_q* are workpiece_from_tool; tool +Z="
-        << (path_torch_params.tool_positive_z_points_from_tcp_to_body
+        << (torch_params.tool_positive_z_points_from_tcp_to_body
             ? "TCP->torch body" : "torch body->TCP")
-        << "; tool +X reference=" << path_torch_params.tool_x_reference;
-    if (path_torch_params.tool_x_reference == "workpiece_x") {
-        std::cout << (path_torch_params.tool_x_points_along_positive_workpiece_x
+        << "; tool +X reference=" << torch_params.tool_x_reference;
+    if (torch_params.tool_x_reference == "workpiece_x") {
+        std::cout << (torch_params.tool_x_points_along_positive_workpiece_x
             ? " (+workpiece X)" : " (-workpiece X)");
     }
     std::cout << std::endl;
     std::cout << "Maximum adjacent orientation change: "
         << maximum_orientation_step_deg << " deg" << std::endl;
     std::cout << "Robot coordinates: " << run_result.csv_path << std::endl;
-    std::cout << "Pink transition/path-point visualization: "
+    std::cout << "Pink transition/corner visualization: "
         << run_result.visualization_ply_path << std::endl;
-    if (path_torch_params.visualization_body_axis_length_mm > 0.0f) {
+    if (torch_params.visualization_body_axis_length_mm > 0.0f) {
         std::cout << "White TCP-to-torch-body axes: "
             << run_result.visualization_ply_path << " (length="
-            << path_torch_params.visualization_body_axis_length_mm << " mm)" << std::endl;
+            << torch_params.visualization_body_axis_length_mm << " mm)" << std::endl;
     }
     std::cout << std::fixed << std::setprecision(3)
         << "Normal processing time: " << normal_time_ms << " ms" << std::endl
@@ -4298,7 +3727,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.3.0";
+    return "2.2.2";
 }
 
 std::string weld_seam_sdk::commandLineHelp()

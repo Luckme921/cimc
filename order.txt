@@ -678,12 +678,37 @@ ls -lh /tmp/weld_ros_offline
 # 但必须Ctrl+C停止终端A并重新运行节点，新的参数才会生效。
 
 # ------------------------------------------------------------
-# 14.3 版本检查和2.2.1回退位置
+# 14.3 两种焊缝路径模式的离线切换（不连接/不驱动任何硬件）
+# ------------------------------------------------------------
+# 默认现场模式：四类拐点 + 2个安全点。
+~/x86_ros2_ws/x86_weld_seam_test/build/weld_seam_extractor \
+  /home/mini/scut_weld_data/pointclouds/capture_1790145455454.ply \
+  /tmp/weld_path_compare feature_points \
+  --config ~/x86_ros2_ws/x86_weld_seam_test/config/default.conf \
+  --set path.mode=feature_points
+
+# 备用模式：沿鲁棒红色轮廓离散；默认直线约12mm、曲率处约4mm，
+# 总数包含首末安全点且最多100。先看CSV和result.ply，禁止直接自动运动。
+~/x86_ros2_ws/x86_weld_seam_test/build/weld_seam_extractor \
+  /home/mini/scut_weld_data/pointclouds/capture_1790145455454.ply \
+  /tmp/weld_path_compare adaptive_contour \
+  --config ~/x86_ros2_ws/x86_weld_seam_test/config/default.conf \
+  --set path.mode=adaptive_contour
+
+ls -lh /tmp/weld_path_compare
+# ROS/launch模式只改下面文件中唯一一行，修改后重启launch，无需重新编译：
+# ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
+# - "path.mode=feature_points"       # 已有现场模式
+# - "path.mode=adaptive_contour"     # 备用连续轮廓模式
+
+# ------------------------------------------------------------
+# 14.4 版本检查和历史回退位置
 # ------------------------------------------------------------
 readlink -f ~/scut_weld_sdk_install/lib/libweld_seam_sdk.so.2
-# 当前期望：libweld_seam_sdk.so.2.2.2
+# 当前期望：libweld_seam_sdk.so.2.3.0
 
-# 修改前2.2.1源码快照：
+# 历史2.2.1与本次修改前2.2.2源码快照：
 # ~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.1
-# 完整回退构建/安装命令见：
+# ~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.2
+# 2.2.1完整回退构建/安装命令见：
 # ~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.1/README.md

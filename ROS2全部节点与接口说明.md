@@ -402,6 +402,7 @@ Base_from_TCP_at_capture * TCP_from_Camera * Camera_from_Tool
 | require_task_armed | true | 必须有任务授权 |
 | send_to_abb | false | 默认禁止真实发送 |
 | protocol_precision | 6 | 数字小数位数 |
+| max_trajectory_points | 100 | 含安全点的最大轨迹点数；超过即拒绝发布/发送 |
 
 matrix_direction=unconfigured 时会拒绝变换，防止未知方向下误发机器人。
 

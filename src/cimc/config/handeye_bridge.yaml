@@ -12,3 +12,5 @@ handeye_abb_bridge_node:
     # ABB端当前只允许存储/打印轨迹，禁止执行运动。
     send_to_abb: true
     protocol_precision: 6
+    # ABB RAPID 端 traj_points 当前最多保存 100 个点；超过时桥接节点拒绝发送。
+    max_trajectory_points: 100

@@ -90,6 +90,7 @@ PoseArray 位置单位是 m，而 YAML 平移是 mm，节点会自动把矩阵�
 ```
 
 节点同时转换位置和姿态，并对相邻四元数统一符号，避免 `q/-q` 导致 ABB 误认为长路径旋转。
+`max_trajectory_points` 默认且最高为 `100`；输入 PoseArray 超过该数量时，节点发布失败状态并拒绝生成 `/abb/trajectory_tcp` 和 `/abb/tx_text`，与 ABB RAPID 的 `traj_points{100}` 存储上限一致。
 
 发布：
 
