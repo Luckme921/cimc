@@ -232,6 +232,11 @@ struct AdaptiveContourParams {
     float curvature_window = 10.0f;
     float curvature_threshold_deg = 8.0f;
 
+    // 路径位置仍跟随真实轮廓；姿态切线按弧长做对称平滑，并限制相邻采样点
+    // 的切线转角，避免局部毛刺或近竖直腰段把焊枪四元数变成单点突变。
+    float orientation_smoothing_radius = 20.0f;
+    float max_orientation_step_deg = 6.0f;
+
     // profile bin 本身已使用中值压缩；这里再用小窗口中值识别点焊飞溅等
     // 局部离群点。连续空洞不超过 max_bridge_gap 时线性跨越，超过则拒绝输出。
     int smoothing_half_window_bins = 8;
@@ -1818,37 +1823,108 @@ static Eigen::Vector3f interpolateAdaptiveLocal(
         ? (arc - profile[left].arc_length) / span : 0.0f;
     const Eigen::Vector3f local =
         (1.0f - alpha) * profile[left].local + alpha * profile[right].local;
-    // 姿态切线不能由相邻 0.8mm bin 决定，否则焊缝带厚度和点焊毛刺会被
-    // 放大成几十度滚转。用当前点前后固定弧长窗口做最小二乘直线拟合。
-    double mean_x = 0.0;
-    double mean_y = 0.0;
-    size_t fit_count = 0;
-    for (const AdaptiveProfilePoint& point : profile) {
-        if (std::abs(point.arc_length - arc) <= slope_window) {
-            mean_x += point.local.x();
-            mean_y += point.local.y();
-            ++fit_count;
-        }
+    // 姿态切线不能由相邻 0.8mm bin 决定。也不能用 Y 对 X 的普通回归：
+    // 波纹腰段接近局部竖直时 X 方差很小，回归斜率会被毫米级噪声放大。
+    // 改为固定弧长窗口两端的有向弦，稳定覆盖水平段、斜腰和近竖直腰段。
+    size_t fit_left = left;
+    while (fit_left > 0 &&
+           arc - profile[fit_left].arc_length < slope_window) {
+        --fit_left;
     }
-    if (fit_count >= 2) {
-        mean_x /= static_cast<double>(fit_count);
-        mean_y /= static_cast<double>(fit_count);
-        double covariance = 0.0;
-        double variance = 0.0;
-        for (const AdaptiveProfilePoint& point : profile) {
-            if (std::abs(point.arc_length - arc) > slope_window) continue;
-            const double dx = static_cast<double>(point.local.x()) - mean_x;
-            covariance += dx * (static_cast<double>(point.local.y()) - mean_y);
-            variance += dx * dx;
-        }
-        local_slope = variance > 1e-8
-            ? static_cast<float>(covariance / variance) : 0.0f;
+    size_t fit_right = right;
+    while (fit_right + 1 < profile.size() &&
+           profile[fit_right].arc_length - arc < slope_window) {
+        ++fit_right;
+    }
+    const Eigen::Vector2f chord =
+        profile[fit_right].local.head<2>() -
+        profile[fit_left].local.head<2>();
+    if (chord.allFinite() && std::abs(chord.x()) > 1e-6f) {
+        local_slope = chord.y() / chord.x();
     } else {
-        const float dx = profile[right].local.x() - profile[left].local.x();
-        local_slope = std::abs(dx) > 1e-6f
-            ? (profile[right].local.y() - profile[left].local.y()) / dx : 0.0f;
+        // profile 按 local_x 递增，真正完全竖直只会来自数值退化。用有限大
+        // 斜率保留腰段方向，后续统一在角度域平滑而不是直接平均此数值。
+        local_slope = chord.y() >= 0.0f ? 1e6f : -1e6f;
     }
     return local;
+}
+
+static std::vector<float> smoothAdaptiveTangentSlopes(
+    const std::vector<float>& sample_arcs,
+    const std::vector<float>& raw_slopes,
+    float smoothing_radius,
+    float max_step_deg,
+    float& raw_max_step_deg,
+    float& smoothed_max_step_deg)
+{
+    const float radians_to_degrees =
+        static_cast<float>(180.0 / 3.14159265358979323846);
+    const float degrees_to_radians = 1.0f / radians_to_degrees;
+    std::vector<float> raw_angles(raw_slopes.size(), 0.0f);
+    for (size_t i = 0; i < raw_slopes.size(); ++i) {
+        raw_angles[i] = std::atan(raw_slopes[i]);
+    }
+
+    raw_max_step_deg = 0.0f;
+    for (size_t i = 1; i < raw_angles.size(); ++i) {
+        raw_max_step_deg = std::max(
+            raw_max_step_deg,
+            std::abs(raw_angles[i] - raw_angles[i - 1]) * radians_to_degrees);
+    }
+
+    // 三角权重中心窗口没有单向相位滞后。平均 atan(slope) 而非 slope，
+    // 使近竖直腰段不会因极大数值获得不成比例的权重。
+    std::vector<float> centered(raw_angles.size(), 0.0f);
+    for (size_t i = 0; i < raw_angles.size(); ++i) {
+        double weighted_angle = 0.0;
+        double weight_sum = 0.0;
+        for (size_t j = 0; j < raw_angles.size(); ++j) {
+            const float distance = std::abs(sample_arcs[j] - sample_arcs[i]);
+            if (distance > smoothing_radius) continue;
+            const float weight = smoothing_radius > 1e-6f
+                ? std::max(0.0f, 1.0f - distance / smoothing_radius)
+                : (i == j ? 1.0f : 0.0f);
+            weighted_angle += static_cast<double>(weight) * raw_angles[j];
+            weight_sum += weight;
+        }
+        centered[i] = weight_sum > 1e-9
+            ? static_cast<float>(weighted_angle / weight_sum) : raw_angles[i];
+    }
+
+    // 分别从首、末端构造满足最大角步长的序列，再取平均。两个满足限幅
+    // 的实数角序列取平均后仍满足同一限幅，同时避免单向滤波在末端积累滞后。
+    const float max_step = max_step_deg * degrees_to_radians;
+    std::vector<float> forward = centered;
+    for (size_t i = 1; i < forward.size(); ++i) {
+        const float delta = forward[i] - forward[i - 1];
+        forward[i] = forward[i - 1] +
+            std::max(-max_step, std::min(max_step, delta));
+    }
+    std::vector<float> backward = centered;
+    for (size_t i = backward.size(); i-- > 1;) {
+        const size_t previous = i - 1;
+        const float delta = backward[previous] - backward[i];
+        backward[previous] = backward[i] +
+            std::max(-max_step, std::min(max_step, delta));
+    }
+
+    std::vector<float> slopes(raw_slopes.size(), 0.0f);
+    smoothed_max_step_deg = 0.0f;
+    float previous_angle = 0.0f;
+    for (size_t i = 0; i < slopes.size(); ++i) {
+        const float angle = 0.5f * (forward[i] + backward[i]);
+        const float safe_angle = std::max(
+            -89.0f * degrees_to_radians,
+            std::min(89.0f * degrees_to_radians, angle));
+        slopes[i] = std::tan(safe_angle);
+        if (i > 0) {
+            smoothed_max_step_deg = std::max(
+                smoothed_max_step_deg,
+                std::abs(safe_angle - previous_angle) * radians_to_degrees);
+        }
+        previous_angle = safe_angle;
+    }
+    return slopes;
 }
 
 static std::vector<float> makeAdaptiveSampleArcs(
@@ -2004,13 +2080,33 @@ static std::vector<WeldFeaturePoint> extractAdaptiveContourPath(
     }
     const float depth_split = medianOf(all_y);
 
+    std::vector<Eigen::Vector3f> sampled_locals;
+    std::vector<float> raw_slopes;
+    sampled_locals.reserve(sample_arcs.size());
+    raw_slopes.reserve(sample_arcs.size());
+    for (float arc : sample_arcs) {
+        float raw_slope = 0.0f;
+        sampled_locals.push_back(interpolateAdaptiveLocal(
+            profile, arc, params.curvature_window, raw_slope));
+        raw_slopes.push_back(raw_slope);
+    }
+    float raw_max_tangent_step_deg = 0.0f;
+    float smoothed_max_tangent_step_deg = 0.0f;
+    const std::vector<float> pose_slopes = smoothAdaptiveTangentSlopes(
+        sample_arcs, raw_slopes,
+        params.orientation_smoothing_radius,
+        params.max_orientation_step_deg,
+        raw_max_tangent_step_deg,
+        smoothed_max_tangent_step_deg);
+
     std::vector<WeldFeaturePoint> weld_points;
     weld_points.reserve(sample_arcs.size());
-    for (float arc : sample_arcs) {
-        float slope = 0.0f;
+    for (size_t sample_index = 0;
+         sample_index < sample_arcs.size(); ++sample_index) {
+        const float arc = sample_arcs[sample_index];
+        const float slope = pose_slopes[sample_index];
         WeldFeaturePoint feature = {};
-        feature.local = interpolateAdaptiveLocal(
-            profile, arc, params.curvature_window, slope);
+        feature.local = sampled_locals[sample_index];
         feature.world = localToWorld(
             feature.local.x(), feature.local.y(), feature.local.z(),
             n_bottom, d_bottom, n_side, d_side, n_tangent);
@@ -2056,6 +2152,8 @@ static std::vector<WeldFeaturePoint> extractAdaptiveContourPath(
         << ", curvature_bins=" << curvature_bin_count
         << ", largest_gap=" << largest_gap << " mm"
         << ", spacing_scale=" << spacing_scale
+        << ", tangent_step_raw_max=" << raw_max_tangent_step_deg << " deg"
+        << ", tangent_step_smoothed_max=" << smoothed_max_tangent_step_deg << " deg"
         << ", weld_samples=" << weld_points.size()
         << ", total_path_points=" << result.size() << std::endl;
     return result;
@@ -2499,6 +2597,15 @@ static bool validateAdaptiveContourParams(
         params.curvature_threshold_deg <= 0.0f ||
         params.curvature_threshold_deg >= 180.0f) {
         return fail("path.curvature_threshold_deg must be within (0, 180).");
+    }
+    if (!std::isfinite(params.orientation_smoothing_radius) ||
+        params.orientation_smoothing_radius < 0.0f) {
+        return fail("path.orientation_smoothing_radius must be finite and >= 0.");
+    }
+    if (!std::isfinite(params.max_orientation_step_deg) ||
+        params.max_orientation_step_deg <= 0.0f ||
+        params.max_orientation_step_deg >= 90.0f) {
+        return fail("path.max_orientation_step_deg must be within (0, 90).");
     }
     if (params.smoothing_half_window_bins < 1 ||
         params.smoothing_half_window_bins > 100) {
@@ -3294,6 +3401,8 @@ static int executeWeldSeamExtraction(
     APPLY_FLOAT("path.corner_influence_radius", adaptive_params.corner_influence_radius);
     APPLY_FLOAT("path.curvature_window", adaptive_params.curvature_window);
     APPLY_FLOAT("path.curvature_threshold_deg", adaptive_params.curvature_threshold_deg);
+    APPLY_FLOAT("path.orientation_smoothing_radius", adaptive_params.orientation_smoothing_radius);
+    APPLY_FLOAT("path.max_orientation_step_deg", adaptive_params.max_orientation_step_deg);
     APPLY_INT("path.smoothing_half_window_bins", adaptive_params.smoothing_half_window_bins);
     APPLY_FLOAT("path.outlier_max_distance", adaptive_params.outlier_max_distance);
     APPLY_FLOAT("path.max_bridge_gap", adaptive_params.max_bridge_gap);
@@ -4298,7 +4407,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.3.0";
+    return "2.3.1";
 }
 
 std::string weld_seam_sdk::commandLineHelp()

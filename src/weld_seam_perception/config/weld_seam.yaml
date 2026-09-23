@@ -14,7 +14,7 @@ weld_seam_node:
     # SDK 参数使用说明：
     # 1. 每项必须是完整字符串：- "key=value"。
     # 2. 当前现场参数原样保留；新增 path.mode 显式锁定已有拐点模式。
-    # 3. 其余是 SDK 2.3.0 默认值模板；删掉行首的 "# " 即可启用。
+    # 3. 其余是 SDK 2.3.1 默认值模板；删掉行首的 "# " 即可启用。
     # 4. 不要同时启用同一 key 的多行；修改后重启节点/launch 生效，无需编译。
     # 5. config_file 非空时先读外部 .conf，algorithm_overrides 再覆盖同名项。
     algorithm_overrides:
@@ -33,10 +33,10 @@ weld_seam_node:
       # ==================== ROI（相机/PLY 坐标系，mm） ====================
       # roi.enable=true 时下面的边界参与过滤。
       # 启用 ROI 前建议同时确认 X/Y/Z 六个边界；-inf/inf 表示不限制。
-      - "roi.min_x=-174.10"
-      - "roi.max_x=210.42"
-      - "roi.min_y=-63.04"
-      - "roi.max_y=124.23"
+      - "roi.min_x=-175.19"
+      - "roi.max_x=198.22"
+      - "roi.min_y=-39.07"
+      - "roi.max_y=146.23"
       - "roi.min_z=-inf"
       - "roi.max_z=inf"
 
@@ -83,7 +83,7 @@ weld_seam_node:
       # false: 工件 local_y 较小一层是凸角；true: 较大一层是凸角。
       # - "feature.protruding_is_larger_local_y=false"
 
-      # ==================== 路径输出模式（SDK 2.3.0） ====================
+      # ==================== 路径输出模式（SDK 2.3.1） ====================
       # path.mode=feature_points：原四类拐点 + 首末安全点（默认，现场稳定模式）。
       # path.mode=adaptive_contour：沿红色焊缝轮廓自适应离散；直线稀、曲率处密。
       # - "path.straight_spacing=12.0"
@@ -94,6 +94,10 @@ weld_seam_node:
       # 此窗口同时用于姿态切线拟合，避免 0.8mm 分箱噪声放大成姿态突跳。
       # - "path.curvature_window=10.0"
       # - "path.curvature_threshold_deg=8.0"
+      # 只平滑焊枪姿态切线，不改变任何采样点 XYZ；半径越大姿态过渡越缓。
+      # - "path.orientation_smoothing_radius=20.0"
+      # 对相邻轮廓点的切线角做双向限幅；默认6°，最终四元数变化通常更小。
+      # - "path.max_orientation_step_deg=6.0"
       # 中值离群检查窗口；点焊飞溅/孤立突起偏离局部中值超过 3mm 时被替换。
       # - "path.smoothing_half_window_bins=8"
       # - "path.outlier_max_distance=3.0"
@@ -101,17 +105,17 @@ weld_seam_node:
       # - "path.max_bridge_gap=15.0"
       # 包含首末两个安全过渡点；ABB 当前硬上限为 100，SDK 不允许配置得更大。
       # - "path.max_points=100"
-      # 连续轮廓全部焊接点使用统一工艺角；开放方向仍随局部轮廓切线连续变化。
+      # 连续轮廓全部焊接点使用独立统一工艺角；不会读取下面四类拐点的角度。
       # - "path.work_angle_deg=45.0"
       # - "path.lead_angle_deg=0.0"
 
       # ==================== 各类焊接点姿态（度） ====================
       # work_angle_deg 必须在 (0, 90)；lead_angle_deg 绝对值必须 < 85。
       # left/right 是算法识别的角点类型，不是机器人基坐标方向。
-      # - "orientation.protruding_left.work_angle_deg=45.0"
-      # - "orientation.protruding_right.work_angle_deg=45.0"
-      # - "orientation.recessed_left.work_angle_deg=45.0"
-      # - "orientation.recessed_right.work_angle_deg=45.0"
+      - "orientation.protruding_left.work_angle_deg=42.0"
+      - "orientation.protruding_right.work_angle_deg=42.0"
+      - "orientation.recessed_left.work_angle_deg=42.0"
+      - "orientation.recessed_right.work_angle_deg=42.0"
       # - "orientation.protruding_left.lead_angle_deg=0.0"
       # - "orientation.protruding_right.lead_angle_deg=0.0"
       # - "orientation.recessed_left.lead_angle_deg=0.0"

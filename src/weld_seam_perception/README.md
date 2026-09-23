@@ -1,6 +1,6 @@
 # weld_seam_perception 包说明
 
-该包是焊缝 SDK 2.3 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。
+该包是焊缝 SDK 2.3.1 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。
 
 ## 文件作用
 
@@ -79,7 +79,7 @@ ROI、四类位置偏置、四类姿态等均可继续添加，不用重新编�
 - "path.mode=adaptive_contour"
 ```
 
-两行不能同时启用。连续模式默认按直线约 12 mm、曲率区约 4 mm 采样，并把首末安全点计入 100 点硬上限；`handeye_abb_bridge_node` 还会在发送前再次拒绝超过 100 点的 PoseArray。
+两行不能同时启用。连续模式默认按直线约 12 mm、曲率区约 4 mm 采样，并把首末安全点计入 100 点硬上限；`handeye_abb_bridge_node` 还会在发送前再次拒绝超过 100 点的 PoseArray。SDK 2.3.1 还默认使用 `path.orientation_smoothing_radius=20.0` 和 `path.max_orientation_step_deg=6.0` 平滑焊枪姿态，不改变采样点 XYZ。`path.work_angle_deg` 是连续模式的独立工作角，不读取四类 `orientation.*.work_angle_deg`。
 
 ## 构建
 
