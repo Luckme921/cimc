@@ -678,7 +678,7 @@ ls -lh /tmp/weld_ros_offline
 # 但必须Ctrl+C停止终端A并重新运行节点，新的参数才会生效。
 
 # ------------------------------------------------------------
-# 14.3 两种焊缝路径模式的离线切换（不连接/不驱动任何硬件）
+# 14.3 三种焊缝路径模式的离线切换（不连接/不驱动任何硬件）
 # ------------------------------------------------------------
 # 默认现场模式：四类拐点 + 2个安全点。
 ~/x86_ros2_ws/x86_weld_seam_test/build/weld_seam_extractor \
@@ -688,7 +688,7 @@ ls -lh /tmp/weld_ros_offline
   --set path.mode=feature_points
 
 # 备用模式：沿鲁棒红色轮廓离散；默认直线约12mm、曲率处约4mm，
-# 总数包含首末安全点且最多100。SDK 2.3.1 默认只对姿态切线做20mm弧长
+# 总数包含首末安全点且最多100。该连续分支默认只对姿态切线做20mm弧长
 # 平滑并把相邻切线变化限制为6°，不会移动焊缝点XYZ。
 # 先看CSV和result.ply，禁止直接自动运动。
 ~/x86_ros2_ws/x86_weld_seam_test/build/weld_seam_extractor \
@@ -697,19 +697,28 @@ ls -lh /tmp/weld_ros_offline
   --config ~/x86_ros2_ws/x86_weld_seam_test/config/default.conf \
   --set path.mode=adaptive_contour
 
+# 推荐备用模式：复用现场 feature_points 的工具坐标系和四类工艺角；
+# 完整圆角5个真实红点（默认目标间距2mm），每段直线1个真实中点；
+# 边界/空洞无法可靠支撑5点时只保留圆角中心1个真实点。
+~/x86_ros2_ws/x86_weld_seam_test/build/weld_seam_extractor \
+  /home/mini/scut_weld_data/pointclouds/capture_1790145455454.ply \
+  /tmp/weld_path_compare rounded_features \
+  --config ~/x86_ros2_ws/x86_weld_seam_test/config/default.conf \
+  --set path.mode=rounded_features
+
 ls -lh /tmp/weld_path_compare
 # ROS/launch模式只改下面文件中唯一一行，修改后重启launch，无需重新编译：
 # ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
 # - "path.mode=feature_points"       # 已有现场模式
+# - "path.mode=rounded_features"     # 稀疏圆角5点 + 直线中点（推荐备用）
 # - "path.mode=adaptive_contour"     # 备用连续轮廓模式
-# 注意：feature_points只有四类拐点，相邻四元数出现约30~45°变化是稀疏拐点
-# 定义本身；需要圆角处逐点顺滑变化时应选择adaptive_contour。
+# 注意：三行只能启用一行；任何新模式先离线看CSV/result.ply并低速验证。
 
 # ------------------------------------------------------------
 # 14.4 版本检查和历史回退位置
 # ------------------------------------------------------------
 readlink -f ~/scut_weld_sdk_install/lib/libweld_seam_sdk.so.2
-# 当前期望：libweld_seam_sdk.so.2.3.1
+# 当前期望：libweld_seam_sdk.so.2.4.0
 
 # 历史2.2.1与本次修改前2.2.2源码快照：
 # ~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.1

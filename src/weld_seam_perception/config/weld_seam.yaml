@@ -14,7 +14,7 @@ weld_seam_node:
     # SDK 参数使用说明：
     # 1. 每项必须是完整字符串：- "key=value"。
     # 2. 当前现场参数原样保留；新增 path.mode 显式锁定已有拐点模式。
-    # 3. 其余是 SDK 2.3.1 默认值模板；删掉行首的 "# " 即可启用。
+    # 3. 其余是 SDK 2.4.0 默认值模板；删掉行首的 "# " 即可启用。
     # 4. 不要同时启用同一 key 的多行；修改后重启节点/launch 生效，无需编译。
     # 5. config_file 非空时先读外部 .conf，algorithm_overrides 再覆盖同名项。
     algorithm_overrides:
@@ -26,17 +26,17 @@ weld_seam_node:
       # 当前 false 表示工具 +X 指向工件 -X；如需反转，只在 false/true 之间切换。
       - "orientation.tool_x_reference=workpiece_x"
       - "orientation.tool_x_points_along_positive_workpiece_x=false"
-      # 默认继续使用已经现场验证的四类拐点路径。需要备用连续轮廓算法时，
-      # 只把 feature_points 改为 adaptive_contour，其他 launch/ROS/ABB 配置不变。
+      # 默认继续使用已经现场验证的四类拐点路径。新稀疏圆角模式改为
+      # rounded_features；原连续密集备用模式仍可改为 adaptive_contour。
       - "path.mode=feature_points"
 
       # ==================== ROI（相机/PLY 坐标系，mm） ====================
       # roi.enable=true 时下面的边界参与过滤。
       # 启用 ROI 前建议同时确认 X/Y/Z 六个边界；-inf/inf 表示不限制。
-      - "roi.min_x=-175.19"
-      - "roi.max_x=198.22"
-      - "roi.min_y=-39.07"
-      - "roi.max_y=146.23"
+      - "roi.min_x=-190.90"
+      - "roi.max_x=185.07"
+      - "roi.min_y=-36.85"
+      - "roi.max_y=158.20"
       - "roi.min_z=-inf"
       - "roi.max_z=inf"
 
@@ -83,8 +83,10 @@ weld_seam_node:
       # false: 工件 local_y 较小一层是凸角；true: 较大一层是凸角。
       # - "feature.protruding_is_larger_local_y=false"
 
-      # ==================== 路径输出模式（SDK 2.3.1） ====================
+      # ==================== 路径输出模式（SDK 2.4.0） ====================
       # path.mode=feature_points：原四类拐点 + 首末安全点（默认，现场稳定模式）。
+      # path.mode=rounded_features：复用旧四类姿态坐标系；完整圆角5个实测点，
+      # 每段真实直线1个实测中点；边界/缺测圆角只保留中心1个实测点。
       # path.mode=adaptive_contour：沿红色焊缝轮廓自适应离散；直线稀、曲率处密。
       # - "path.straight_spacing=12.0"
       # - "path.corner_spacing=4.0"
@@ -106,20 +108,42 @@ weld_seam_node:
       # 包含首末两个安全过渡点；ABB 当前硬上限为 100，SDK 不允许配置得更大。
       # - "path.max_points=100"
       # 连续轮廓全部焊接点使用独立统一工艺角；不会读取下面四类拐点的角度。
-      # - "path.work_angle_deg=45.0"
+      # - "path.work_angle_deg=43.0"
       # - "path.lead_angle_deg=0.0"
+      # rounded_features 专用。2mm 是沿稳健轮廓弧长的目标间距，最终位置从
+      # 红色实测点中选取，所以实际相邻距离会随点云密度略有变化。
+      # - "path.rounded_corner_point_count=5"
+      # - "path.rounded_corner_spacing=2.0"
+      # - "path.rounded_measured_search_radius=6.0"
+      # 小于此有效弧长的直线段不强行增加中点。
+      # - "path.rounded_min_straight_span=8.0"
 
       # ==================== 各类焊接点姿态（度） ====================
       # work_angle_deg 必须在 (0, 90)；lead_angle_deg 绝对值必须 < 85。
       # left/right 是算法识别的角点类型，不是机器人基坐标方向。
-      - "orientation.protruding_left.work_angle_deg=42.0"
-      - "orientation.protruding_right.work_angle_deg=42.0"
-      - "orientation.recessed_left.work_angle_deg=42.0"
-      - "orientation.recessed_right.work_angle_deg=42.0"
+      - "orientation.protruding_left.work_angle_deg=35.0"
+      - "orientation.protruding_right.work_angle_deg=35.0"
+      - "orientation.recessed_left.work_angle_deg=35.0"
+      - "orientation.recessed_right.work_angle_deg=35.0"
+      # rounded_features 的四类直线中点也使用同一工具坐标系构造规则；这里
+      # 显式设为当前现场35°，以后可按四种物理线段分别微调。
+      - "orientation.straight_protruding_flat.work_angle_deg=35.0"
+      - "orientation.straight_left_waist.work_angle_deg=35.0"
+      - "orientation.straight_recessed_flat.work_angle_deg=35.0"
+      - "orientation.straight_right_waist.work_angle_deg=35.0"
       # - "orientation.protruding_left.lead_angle_deg=0.0"
       # - "orientation.protruding_right.lead_angle_deg=0.0"
       # - "orientation.recessed_left.lead_angle_deg=0.0"
       # - "orientation.recessed_right.lead_angle_deg=0.0"
+      # - "orientation.straight_protruding_flat.lead_angle_deg=0.0"
+      # - "orientation.straight_left_waist.lead_angle_deg=0.0"
+      # - "orientation.straight_recessed_flat.lead_angle_deg=0.0"
+      # - "orientation.straight_right_waist.lead_angle_deg=0.0"
+      # 安全点默认严格继承相邻焊点；下面是只作用于首/末安全点的角度增量。
+      # - "orientation.start_transition.work_angle_offset_deg=0.0"
+      # - "orientation.start_transition.lead_angle_offset_deg=0.0"
+      # - "orientation.end_transition.work_angle_offset_deg=0.0"
+      # - "orientation.end_transition.lead_angle_offset_deg=0.0"
       # tool_x_reference 可选 workpiece_x 或 corner_bisector（当前已启用 workpiece_x）。
       # tool_positive_z... 与 tool_x... 两项方向开关已在上方启用，勿在此重复添加。
 
@@ -132,18 +156,31 @@ weld_seam_node:
       # - "offset.end_transition.x=0.0"
       # - "offset.end_transition.y=0.0"
       # - "offset.end_transition.z=0.0"
-      # - "offset.protruding_left.x=2.5"
+      - "offset.protruding_left.x=1.0"
       # - "offset.protruding_left.y=0.0"
-      # - "offset.protruding_left.z=0.0"
+      - "offset.protruding_left.z=-2.0"
       # - "offset.protruding_right.x=-0.5"
       # - "offset.protruding_right.y=0.0"
-      # - "offset.protruding_right.z=0.0"
+      - "offset.protruding_right.z=-2.0"
       # - "offset.recessed_left.x=0.0"
       # - "offset.recessed_left.y=1.0"
-      # - "offset.recessed_left.z=0.0"
+      - "offset.recessed_left.z=-5.0"
       # - "offset.recessed_right.x=0.0"
       # - "offset.recessed_right.y=1.0"
-      # - "offset.recessed_right.z=0.0"
+      - "offset.recessed_right.z=-5.0"
+      # rounded_features 四类直线中点的独立工件坐标偏置（SDK默认均为0）。
+      # - "offset.straight_protruding_flat.x=0.0"
+      # - "offset.straight_protruding_flat.y=0.0"
+      # - "offset.straight_protruding_flat.z=0.0"
+      # - "offset.straight_left_waist.x=0.0"
+      # - "offset.straight_left_waist.y=0.0"
+      # - "offset.straight_left_waist.z=0.0"
+      # - "offset.straight_recessed_flat.x=0.0"
+      # - "offset.straight_recessed_flat.y=0.0"
+      # - "offset.straight_recessed_flat.z=0.0"
+      # - "offset.straight_right_waist.x=0.0"
+      # - "offset.straight_right_waist.y=0.0"
+      # - "offset.straight_right_waist.z=0.0"
       # 连续轮廓模式使用统一偏置，避免在四类分界处产生位置阶跃。
       # - "offset.adaptive_contour.x=0.0"
       # - "offset.adaptive_contour.y=0.0"

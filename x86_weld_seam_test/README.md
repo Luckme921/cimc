@@ -1,4 +1,4 @@
-# x86 焊缝提取算法与 SDK 2.3.1
+# x86 焊缝提取算法与 SDK 2.4.0
 
 本目录是 Ubuntu 22.04 x86_64 上的独立算法工程。它同时生成：
 
@@ -6,7 +6,7 @@
 - `libweld_seam_sdk.so`：供 ROS 2 节点或其他 C++ 程序进程内调用的共享库；
 - 可安装的头文件和 CMake package，外部工程可使用 `find_package(weld_seam_sdk)`。
 
-2.3.0 保留 2.2.2 的红色焊缝、平面提取和四类周期拐点模式，并新增可切换的 `adaptive_contour` 备用路径。2.3.1 修复近竖直波纹腰段切线回归不稳定的问题，并新增弧长姿态平滑与相邻转角限幅；它们不改变焊缝点 XYZ。默认仍是已经现场使用的 `feature_points`，升级后不会自动改变机器人路径。
+2.4.0 保留 `feature_points` 和 `adaptive_contour`，新增 `rounded_features` 稀疏圆角模式：复用已现场验证的四类工具坐标系与工艺角，每个有完整实测支撑的圆角输出 5 个真实红色焊缝点，每段直线输出 1 个真实中点；边界或缺测圆角只输出中心 1 点，绝不插值伪造位置。默认仍是 `feature_points`，升级后不会自动改变机器人路径。
 
 ## 1. 文件说明
 
@@ -16,7 +16,7 @@
 | `CMakeLists.txt` | 构建 CLI、共享库、安装包和 CMake 导出配置 |
 | `include/weld_seam_sdk/weld_seam_sdk.hpp` | 稳定的 C++ SDK 公共接口 |
 | `config/default.conf` | 全部可运行时修改的算法参数及当前生产默认值 |
-| `参数手册.md` | 88 个运行参数的逐项中文含义、坐标方向和调参顺序 |
+| `参数手册.md` | 全部运行参数的逐项中文含义、坐标方向和调参顺序 |
 | `cmake/weld_seam_sdkConfig.cmake.in` | 供安装后的 `find_package` 使用 |
 | `build/` | 本机编译目录，可删除后重新生成 |
 | `output/` | 建议保存独立测试结果，不参与编译 |
@@ -39,8 +39,10 @@ flowchart TD
     J --> K["稳定版红色焊缝点提取"]
     K --> L{"path.mode"}
     L -->|"feature_points"| M["四类周期拓扑、拐点与安全弦"]
+    L -->|"rounded_features"| R["旧四类姿态 + 圆角5点 + 直线中点"]
     L -->|"adaptive_contour"| P["中值轮廓、离群抑制、曲率自适应采样"]
     M --> N["分类偏置、姿态与安全过渡点"]
+    R --> N
     P --> N
     N --> O["CSV + 精确点 PLY + 粉红十字可视化 PLY"]
 ```
@@ -156,6 +158,12 @@ cmake --build build -j"$(nproc)"
 ./build/weld_seam_extractor input.ply output contour \
   --config config/default.conf \
   --set path.mode=adaptive_contour
+
+# 推荐的稀疏圆角路径；一个完整四角周期通常为20个圆角点、4个直线中点
+# 和2个安全点。位置来自实测红点，姿态坐标系沿用 feature_points。
+./build/weld_seam_extractor input.ply output rounded \
+  --config config/default.conf \
+  --set path.mode=rounded_features
 ```
 
 只测试法向策略：
@@ -185,9 +193,11 @@ cmake --build build -j"$(nproc)"
 
 `feature_points` 只输出四类真实焊接拐点：`PROTRUDING_LEFT`、`PROTRUDING_RIGHT`、`RECESSED_LEFT`、`RECESSED_RIGHT`。一般的不完整视野边缘不会制造拐点；仅当同一帧已经提供完整周期、周期预测仍位于红色轮廓范围内且距离首/末轮廓边界不超过 `max_corner_extrapolation` 时才补全一个边界角。
 
-`adaptive_contour` 不要求四类拐点检测完整。其焊接行在 CSV 中标记为 `feature_type=adaptive_contour_point`、`point_source=robust_profile_adaptive_sampling`，姿态源为 `local_contour_tangent`。两种模式都在首尾增加安全过渡点；ROS 节点仍只读取统一的 `x,y,z,qw,qx,qy,qz`，因此手眼与 ABB 协议不变。
+`adaptive_contour` 不要求四类拐点检测完整。其焊接行在 CSV 中标记为 `feature_type=adaptive_contour_point`、`point_source=robust_profile_adaptive_sampling`，姿态源为 `local_contour_tangent`。三种模式都在首尾增加安全过渡点；ROS 节点仍只读取统一的 `x,y,z,qw,qx,qy,qz`，因此手眼与 ABB 协议不变。
 
-旧 `feature_points` 每个物理拐角只输出一个离散点，左右腰切换时相邻 CSV 四元数出现 30–45° 变化属于该模式的几何定义，不能在不增加路径点的前提下变成渐变。需要焊枪在圆角/曲率区域连续过渡时，应使用 `adaptive_contour`；2.3.1 默认在 20 mm 弧长半径内平滑姿态切线，并把相邻切线角限制为 6°，但不会移动采样点位置。
+`rounded_features` 先运行与 `feature_points` 相同的四类周期角点检测，再到红色焊缝原始点集合中选取圆角点和直线中点。CSV 的 `point_source=measured_red_seam_point` 表示偏移前位置确实来自输入点云；随后仍会按点类施加配置的工件 XYZ 偏移，所以非零偏移后的最终机器人目标有意不再与原始点重合。圆角 5 点在两侧稳健直线姿态之间分摊转角，但工具 X、工具 Z、四类 work/lead 角和正负方向仍走旧版同一姿态函数。
+
+旧 `feature_points` 每个物理拐角只输出一个离散点，左右腰切换时相邻 CSV 四元数出现 30–45° 变化属于该模式的几何定义。优先使用 `rounded_features` 在保持旧工具坐标系的前提下把圆角转姿分摊到 5 个点；`adaptive_contour` 仍保留 20 mm 弧长姿态平滑与 6° 切线步长限制，适合需要更密连续轮廓的离线对照。
 
 ## 7. 主要可调参数
 
@@ -199,8 +209,10 @@ cmake --build build -j"$(nproc)"
 - `feature.*`：轮廓分箱、线段法向投票、孔洞桥接、线段长度、重复角点合并、安全弦和安全过渡距离。
 - `path.*`：输出模式、直线/曲率点距、轮廓与姿态平滑、姿态步长限制、空洞安全上限、统一工艺角和最多100点限制。
 - `orientation.*`：四类拐点的工作角/前进角、工具正 Z 轴定义，以及工具 X 使用工件轴或旧角平分线。
+- `orientation.start_transition/end_transition.*_offset_deg`：首末安全点相对相邻焊点的独立姿态增量；默认0保持平滑继承。
 - `offset.start_transition.*`、`offset.end_transition.*`：两个安全过渡点的位置微调。
 - `offset.protruding_left/right.*`、`offset.recessed_left/right.*`：四类真实拐点沿工件局部 XYZ 的位置微调。
+- `offset.straight_protruding_flat/left_waist/recessed_flat/right_waist.*`：稀疏圆角模式四类直线中点的独立偏移。
 - `offset.adaptive_contour.*`：连续轮廓全部焊接点的统一工件 XYZ 偏置。
 - `visualization.*`：粉红十字半径、枪体方向线长度，只影响校验显示。
 

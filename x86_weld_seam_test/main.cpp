@@ -221,7 +221,8 @@ struct FeatureExtractionParams {
 
 struct AdaptiveContourParams {
     // feature_points 保留 2.2.2 的四类拐点路径；adaptive_contour 沿已经
-    // 提取出的红色焊缝轮廓自适应离散，供曲率或制造误差较大的工件使用。
+    // 提取出的红色焊缝轮廓自适应离散；rounded_features 使用与
+    // feature_points 相同的四类姿态坐标系，并在每个实测圆角附近输出少量点。
     std::string mode = "feature_points";
 
     // 直线段稀疏、转角/曲率段密集。实际点距还会在 max_points 约束下
@@ -249,13 +250,24 @@ struct AdaptiveContourParams {
     // 连续轮廓模式使用统一工艺角，局部开放方向由轮廓切线实时计算。
     float work_angle_deg = 45.0f;
     float lead_angle_deg = 0.0f;
+
+    // rounded_features：完整圆角默认在中心前后各 4mm 内输出 5 个实测红点；
+    // 位于 ROI 首末边界、没有足够双侧轮廓支撑的圆角只保留中心一个实测点。
+    int rounded_corner_point_count = 5;
+    float rounded_corner_spacing = 2.0f;
+    float rounded_measured_search_radius = 6.0f;
+    float rounded_min_straight_span = 8.0f;
 };
 
 enum TorchPoseGroup {
     TORCH_PROTRUDING_LEFT = 0,
     TORCH_PROTRUDING_RIGHT = 1,
     TORCH_RECESSED_LEFT = 2,
-    TORCH_RECESSED_RIGHT = 3
+    TORCH_RECESSED_RIGHT = 3,
+    TORCH_STRAIGHT_PROTRUDING_FLAT = 4,
+    TORCH_STRAIGHT_LEFT_WAIST = 5,
+    TORCH_STRAIGHT_RECESSED_FLAT = 6,
+    TORCH_STRAIGHT_RIGHT_WAIST = 7
 };
 
 struct TorchOrientationParams {
@@ -265,6 +277,10 @@ struct TorchOrientationParams {
     float protruding_right_work_angle_deg = 45.0f;
     float recessed_left_work_angle_deg = 45.0f;
     float recessed_right_work_angle_deg = 45.0f;
+    float straight_protruding_flat_work_angle_deg = 45.0f;
+    float straight_left_waist_work_angle_deg = 45.0f;
+    float straight_recessed_flat_work_angle_deg = 45.0f;
+    float straight_right_waist_work_angle_deg = 45.0f;
 
     // lead_angle：焊枪在底板平面内沿焊接前进方向的前倾/后倾角。
     // 正值朝 CSV 顺序前倾，负值反向，0°表示不前倾。建议先保持0°。
@@ -272,6 +288,17 @@ struct TorchOrientationParams {
     float protruding_right_lead_angle_deg = 0.0f;
     float recessed_left_lead_angle_deg = 0.0f;
     float recessed_right_lead_angle_deg = 0.0f;
+    float straight_protruding_flat_lead_angle_deg = 0.0f;
+    float straight_left_waist_lead_angle_deg = 0.0f;
+    float straight_recessed_flat_lead_angle_deg = 0.0f;
+    float straight_right_waist_lead_angle_deg = 0.0f;
+
+    // 安全过渡点默认严格继承相邻焊点姿态；非零值只对首/末安全点叠加，
+    // 不改变相邻焊接点，便于现场单独微调接近/退出姿态。
+    float start_transition_work_angle_offset_deg = 0.0f;
+    float start_transition_lead_angle_offset_deg = 0.0f;
+    float end_transition_work_angle_offset_deg = 0.0f;
+    float end_transition_lead_angle_offset_deg = 0.0f;
 
     // CSV 同时输出 PLY 世界姿态 qw... 和工件姿态 workpiece_qw...，顺序均为 w,x,y,z。
     // true：工具 +Z 轴定义为 TCP -> 枪体；false：工具 +Z 轴定义为枪体 -> TCP。
@@ -330,6 +357,10 @@ struct FeaturePositionOffsetParams {
     WorkpieceOffset3f protruding_right;
     WorkpieceOffset3f recessed_left;
     WorkpieceOffset3f recessed_right;
+    WorkpieceOffset3f straight_protruding_flat;
+    WorkpieceOffset3f straight_left_waist;
+    WorkpieceOffset3f straight_recessed_flat;
+    WorkpieceOffset3f straight_right_waist;
     // adaptive_contour 模式的全部焊接采样点使用同一组连续偏置，避免在
     // 四类拐点边界发生毫米级阶跃；安全过渡点在此基础上再加首/末微调。
     WorkpieceOffset3f adaptive_contour;
@@ -395,6 +426,9 @@ struct WeldFeaturePoint {
     float detection_score;
     bool topology_inferred;
     bool is_contour_sample = false;
+    bool is_rounded_corner_sample = false;
+    bool is_straight_midpoint = false;
+    int pose_group_override = -1;
 };
 
 static float medianOf(std::vector<float> values)
@@ -1018,6 +1052,8 @@ static WeldFeaturePoint makeSafeTransitionPoint(
     transition.is_transition_point = true;
     transition.is_start_transition = is_start;
     transition.measured_on_arc = false;
+    transition.is_rounded_corner_sample = false;
+    transition.is_straight_midpoint = false;
     transition.distance_to_ideal = 0.0f;
     transition.merged_detection_count = 1;
 
@@ -2159,6 +2195,433 @@ static std::vector<WeldFeaturePoint> extractAdaptiveContourPath(
     return result;
 }
 
+struct RoundedPathCandidate {
+    float arc;
+    WeldFeaturePoint feature;
+};
+
+static float nearestProfileArc(
+    const std::vector<AdaptiveProfilePoint>& profile,
+    const Eigen::Vector3f& local)
+{
+    float best_arc = profile.front().arc_length;
+    float best_distance_squared = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < profile.size(); ++i) {
+        const Eigen::Vector2f delta =
+            profile[i].local.head<2>() - local.head<2>();
+        if (delta.squaredNorm() < best_distance_squared) {
+            best_distance_squared = delta.squaredNorm();
+            best_arc = profile[i].arc_length;
+        }
+    }
+    return best_arc;
+}
+
+static int selectMeasuredPathPoint(
+    const std::vector<SeamProfileSample>& samples,
+    float target_x,
+    float target_y,
+    float search_radius,
+    const FeatureExtractionParams& params,
+    const std::vector<Eigen::Vector3f>& used_locals,
+    float minimum_separation)
+{
+    const auto is_separated = [&](const SeamProfileSample& sample) {
+        for (size_t i = 0; i < used_locals.size(); ++i) {
+            const Eigen::Vector2f delta =
+                Eigen::Vector2f(sample.local_x, sample.local_y) -
+                used_locals[i].head<2>();
+            if (delta.norm() < minimum_separation) return false;
+        }
+        return true;
+    };
+    float nearest_distance_squared = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (!is_separated(samples[i])) continue;
+        const float dx = samples[i].local_x - target_x;
+        const float dy = samples[i].local_y - target_y;
+        nearest_distance_squared = std::min(
+            nearest_distance_squared, dx * dx + dy * dy);
+    }
+    if (!std::isfinite(nearest_distance_squared)) return -1;
+    const float maximum_distance = std::min(
+        search_radius,
+        std::sqrt(nearest_distance_squared) + params.low_z_xy_tolerance);
+    const float maximum_distance_squared = maximum_distance * maximum_distance;
+
+    std::vector<float> nearby_z;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (!is_separated(samples[i])) continue;
+        const float dx = samples[i].local_x - target_x;
+        const float dy = samples[i].local_y - target_y;
+        if (dx * dx + dy * dy <= maximum_distance_squared) {
+            nearby_z.push_back(samples[i].local_z);
+        }
+    }
+    if (nearby_z.empty()) return -1;
+    const float robust_low_z = quantileOf(nearby_z, params.bottom_z_quantile);
+
+    // 与旧单拐点逻辑一样由稳健低 Z 主导，保证目标贴近真实角接焊缝根部；
+    // 同时排除已用点附近的窄区，避免相隔2mm的目标重复选择同一个最低点。
+    const float z_tolerance = std::max(0.5f, params.low_z_xy_tolerance);
+    int best_sample = -1;
+    float best_score = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (!is_separated(samples[i])) continue;
+        const float dx = samples[i].local_x - target_x;
+        const float dy = samples[i].local_y - target_y;
+        const float distance_squared = dx * dx + dy * dy;
+        const float z_delta = std::abs(samples[i].local_z - robust_low_z);
+        if (distance_squared > maximum_distance_squared ||
+            z_delta > z_tolerance) {
+            continue;
+        }
+        const float score = z_delta + 0.02f * std::sqrt(distance_squared);
+        if (score < best_score) {
+            best_score = score;
+            best_sample = static_cast<int>(i);
+        }
+    }
+    return best_sample;
+}
+
+static bool selectMeasuredRoundedPoint(
+    const std::vector<AdaptiveProfilePoint>& profile,
+    const std::vector<SeamProfileSample>& samples,
+    float arc,
+    float search_radius,
+    const FeatureExtractionParams& feature_params,
+    const std::vector<Eigen::Vector3f>& used_locals,
+    float minimum_separation,
+    Eigen::Vector3f& measured_local,
+    Eigen::Vector3f& measured_world,
+    Eigen::Vector3f& ideal_local,
+    float& local_slope,
+    float& distance_to_ideal)
+{
+    ideal_local = interpolateAdaptiveLocal(
+        profile, arc, feature_params.local_fit_radius, local_slope);
+    const int measured_index = selectMeasuredPathPoint(
+        samples, ideal_local.x(), ideal_local.y(),
+        search_radius, feature_params, used_locals, minimum_separation);
+    if (measured_index < 0) return false;
+
+    const SeamProfileSample& measured =
+        samples[static_cast<size_t>(measured_index)];
+    measured_local = Eigen::Vector3f(
+        measured.local_x, measured.local_y, measured.local_z);
+    measured_world = measured.world;
+    distance_to_ideal =
+        (measured_local.head<2>() - ideal_local.head<2>()).norm();
+    return true;
+}
+
+static TorchPoseGroup straightPoseGroup(
+    SeamSegmentType segment,
+    bool protruding)
+{
+    if (segment == SEGMENT_DIAGONAL_POSITIVE) {
+        return TORCH_STRAIGHT_LEFT_WAIST;
+    }
+    if (segment == SEGMENT_DIAGONAL_NEGATIVE) {
+        return TORCH_STRAIGHT_RIGHT_WAIST;
+    }
+    return protruding
+        ? TORCH_STRAIGHT_PROTRUDING_FLAT
+        : TORCH_STRAIGHT_RECESSED_FLAT;
+}
+
+static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
+    const pcl::PointCloud<PointInT>::ConstPtr& cloud,
+    const std::vector<bool>& is_final_seam,
+    const Eigen::Vector3f& n_bottom,
+    float d_bottom,
+    const Eigen::Vector3f& n_side,
+    float d_side,
+    const Eigen::Vector3f& n_tangent,
+    const FeatureExtractionParams& feature_params,
+    const AdaptiveContourParams& path_params,
+    std::string& error)
+{
+    std::vector<WeldFeaturePoint> result;
+
+    // 先复用已经现场验证的四类角点检测、周期筛选和左右腰分类。新模式只改变
+    // 每个角附近的采样数量与直线中点，不改变四类姿态坐标系的物理定义。
+    const std::vector<WeldFeaturePoint> old_path = extractOrderedWeldFeatures(
+        cloud, is_final_seam,
+        n_bottom, d_bottom, n_side, d_side, n_tangent, feature_params);
+    if (old_path.size() < 3) {
+        error = "rounded features: no complete four-type corner chain";
+        return result;
+    }
+    std::vector<WeldFeaturePoint> corners(
+        old_path.begin() + 1, old_path.end() - 1);
+
+    const std::vector<SeamProfileSample> samples = collectSeamProfileSamples(
+        cloud, is_final_seam, n_bottom, d_bottom, n_side, d_side,
+        n_tangent, feature_params);
+    std::vector<SeamProfileBin> bins = buildProfileBins(samples, feature_params);
+    if (samples.size() < 2 || bins.size() < 3) {
+        error = "rounded features: too few measured red seam points/profile bins";
+        return result;
+    }
+
+    float largest_gap = 0.0f;
+    bins = filterAdaptiveProfile(bins, path_params, largest_gap);
+    if (largest_gap > path_params.max_bridge_gap) {
+        std::ostringstream stream;
+        stream << "rounded features: profile gap " << largest_gap
+               << " mm exceeds path.max_bridge_gap="
+               << path_params.max_bridge_gap << " mm";
+        error = stream.str();
+        return result;
+    }
+
+    std::vector<AdaptiveProfilePoint> profile;
+    profile.reserve(bins.size());
+    for (size_t i = 0; i < bins.size(); ++i) {
+        AdaptiveProfilePoint point;
+        point.local = Eigen::Vector3f(
+            bins[i].local_x, bins[i].local_y, bins[i].local_z);
+        point.arc_length = profile.empty() ? 0.0f :
+            profile.back().arc_length +
+            (point.local.head<2>() - profile.back().local.head<2>()).norm();
+        point.corner_distance = 0.0f;
+        profile.push_back(point);
+    }
+    if (profile.back().arc_length < 1.0f) {
+        error = "rounded features: usable measured contour is shorter than 1 mm";
+        return result;
+    }
+
+    std::vector<float> corner_arcs;
+    corner_arcs.reserve(corners.size());
+    for (size_t i = 0; i < corners.size(); ++i) {
+        corner_arcs.push_back(nearestProfileArc(profile, corners[i].local));
+        if (i > 0 && corner_arcs[i] <= corner_arcs[i - 1] + 1e-3f) {
+            error = "rounded features: detected corner order is not monotonic on measured profile";
+            return result;
+        }
+    }
+
+    std::vector<float> all_y;
+    all_y.reserve(profile.size());
+    for (size_t i = 0; i < profile.size(); ++i) {
+        all_y.push_back(profile[i].local.y());
+    }
+    const float depth_split = medianOf(all_y);
+    const int half_corner_count = path_params.rounded_corner_point_count / 2;
+    const float corner_half_span =
+        static_cast<float>(half_corner_count) * path_params.rounded_corner_spacing;
+    std::vector<bool> complete_corner_flags(corners.size(), false);
+    for (size_t i = 0; i < corners.size(); ++i) {
+        const float left_limit = i == 0 ? 0.0f :
+            0.5f * (corner_arcs[i - 1] + corner_arcs[i]);
+        const float right_limit = i + 1 == corners.size()
+            ? profile.back().arc_length
+            : 0.5f * (corner_arcs[i] + corner_arcs[i + 1]);
+        complete_corner_flags[i] =
+            corner_arcs[i] - corner_half_span >= left_limit &&
+            corner_arcs[i] + corner_half_span <= right_limit;
+    }
+
+    std::vector<RoundedPathCandidate> candidates;
+    std::vector<Eigen::Vector3f> used_measured_locals;
+    size_t complete_corner_count = 0;
+    size_t boundary_single_count = 0;
+    size_t straight_midpoint_count = 0;
+
+    for (size_t corner_index = 0; corner_index < corners.size(); ++corner_index) {
+        const float center_arc = corner_arcs[corner_index];
+        const bool complete_corner = complete_corner_flags[corner_index];
+        const int first_offset = complete_corner ? -half_corner_count : 0;
+        const int last_offset = complete_corner ? half_corner_count : 0;
+        const size_t candidate_count_before_corner = candidates.size();
+        const size_t used_count_before_corner = used_measured_locals.size();
+        const auto append_corner_sample = [&](int offset_index,
+                                              bool interpolate_pose,
+                                              float minimum_separation) {
+            const float target_arc = center_arc +
+                static_cast<float>(offset_index) * path_params.rounded_corner_spacing;
+            WeldFeaturePoint feature = corners[corner_index];
+            float measured_slope = 0.0f;
+            if (!selectMeasuredRoundedPoint(
+                    profile, samples, target_arc,
+                    path_params.rounded_measured_search_radius,
+                    feature_params,
+                    used_measured_locals,
+                    minimum_separation,
+                    feature.local, feature.world, feature.ideal_local,
+                    measured_slope, feature.distance_to_ideal)) {
+                return false;
+            }
+            feature.is_transition_point = false;
+            feature.is_start_transition = false;
+            feature.measured_on_arc = true;
+            feature.is_contour_sample = false;
+            feature.is_rounded_corner_sample = true;
+            feature.is_straight_midpoint = false;
+            feature.pose_group_override = -1;
+            feature.merged_detection_count = 1;
+            feature.detection_score = interpolate_pose
+                ? static_cast<float>(path_params.rounded_corner_point_count) : 1.0f;
+            // 姿态仍由旧版 makeTorchPoseForCorner、固定工件 Tool X、所属四类
+            // work/lead 参数生成；仅在5个圆角点之间按两侧稳健直线角度插值，
+            // 不使用实测噪声切线，从而把原来一次转角分摊成连续小转角。
+            if (interpolate_pose && last_offset > first_offset) {
+                const float blend = static_cast<float>(offset_index - first_offset) /
+                    static_cast<float>(last_offset - first_offset);
+                const float left_angle = std::atan(feature.left_line_slope);
+                const float right_angle = std::atan(feature.right_line_slope);
+                const float interpolated_angle =
+                    (1.0f - blend) * left_angle + blend * right_angle;
+                const float maximum_angle = static_cast<float>(
+                    89.0 * 3.14159265358979323846 / 180.0);
+                const float safe_angle = std::max(
+                    -maximum_angle, std::min(maximum_angle, interpolated_angle));
+                const float interpolated_slope = std::tan(safe_angle);
+                feature.left_line_slope = interpolated_slope;
+                feature.right_line_slope = interpolated_slope;
+            }
+            RoundedPathCandidate candidate;
+            candidate.arc = target_arc;
+            candidate.feature = feature;
+            candidates.push_back(candidate);
+            used_measured_locals.push_back(feature.local);
+            return true;
+        };
+
+        bool sampled_complete_corner = complete_corner;
+        for (int offset_index = first_offset;
+             offset_index <= last_offset; ++offset_index) {
+            if (!append_corner_sample(
+                    offset_index, complete_corner,
+                    0.25f * path_params.rounded_corner_spacing)) {
+                sampled_complete_corner = false;
+                break;
+            }
+        }
+        if (!sampled_complete_corner && complete_corner) {
+            // 圆角两侧几何范围足够，但实测红点过稀/有点焊空洞时，不插值造点；
+            // 回退为该圆角中心一个真实点，与 ROI 边界圆角的安全策略一致。
+            candidates.resize(candidate_count_before_corner);
+            used_measured_locals.resize(used_count_before_corner);
+            if (!append_corner_sample(0, false, 0.0f)) {
+                error = "rounded features: cannot select a real red seam point at corner center";
+                return std::vector<WeldFeaturePoint>();
+            }
+        }
+        if (sampled_complete_corner) ++complete_corner_count;
+        else ++boundary_single_count;
+
+        // 每个角点之后的真实直线段只放一个中心点。最后一个角点到 ROI 实测
+        // 轮廓末端也按同样规则处理，因此一个完整四角周期最多得到四个中点。
+        const float segment_begin = center_arc +
+            (sampled_complete_corner ? corner_half_span : 0.0f);
+        const float segment_end = corner_index + 1 < corners.size()
+            ? corner_arcs[corner_index + 1] -
+                (complete_corner_flags[corner_index + 1]
+                    ? corner_half_span : 0.0f)
+            : profile.back().arc_length;
+        if (segment_end - segment_begin >= path_params.rounded_min_straight_span) {
+            const float target_arc = 0.5f * (segment_begin + segment_end);
+            WeldFeaturePoint feature = corners[corner_index];
+            float measured_slope = feature.right_line_slope;
+            float profile_slope = measured_slope;
+            if (!selectMeasuredRoundedPoint(
+                    profile, samples, target_arc,
+                    path_params.rounded_measured_search_radius,
+                    feature_params,
+                    used_measured_locals,
+                    0.25f * path_params.rounded_corner_spacing,
+                    feature.local, feature.world, feature.ideal_local,
+                    profile_slope, feature.distance_to_ideal)) {
+                std::cerr << "Rounded features: skipped one straight midpoint because "
+                             "no real red seam point is available near its center."
+                          << std::endl;
+                continue;
+            }
+            SeamSegmentType segment = feature.right_segment;
+            if (segment == SEGMENT_UNKNOWN) {
+                measured_slope = profile_slope;
+                segment = classifyProfileSlope(measured_slope, feature_params);
+            }
+            feature.protruding = feature_params.protruding_is_larger_local_y
+                ? feature.local.y() >= depth_split
+                : feature.local.y() <= depth_split;
+            feature.is_transition_point = false;
+            feature.is_start_transition = false;
+            feature.measured_on_arc = true;
+            feature.is_contour_sample = false;
+            feature.is_rounded_corner_sample = false;
+            feature.is_straight_midpoint = true;
+            feature.pose_group_override = static_cast<int>(
+                straightPoseGroup(segment, feature.protruding));
+            feature.left_line_slope = measured_slope;
+            feature.right_line_slope = measured_slope;
+            feature.left_segment = segment;
+            feature.right_segment = segment;
+            feature.topology_state = CORNER_TOPOLOGY_UNKNOWN;
+            feature.topology_inferred = false;
+            feature.merged_detection_count = 1;
+            feature.detection_score = segment_end - segment_begin;
+
+            RoundedPathCandidate candidate;
+            candidate.arc = target_arc;
+            candidate.feature = feature;
+            candidates.push_back(candidate);
+            used_measured_locals.push_back(feature.local);
+            ++straight_midpoint_count;
+        }
+    }
+
+    std::sort(candidates.begin(), candidates.end(),
+        [](const RoundedPathCandidate& left, const RoundedPathCandidate& right) {
+            return left.arc < right.arc;
+        });
+    if (candidates.empty()) {
+        error = "rounded features: no measured target point was generated";
+        return result;
+    }
+    if (candidates.size() + 2 > static_cast<size_t>(path_params.max_points)) {
+        std::ostringstream stream;
+        stream << "rounded features: " << candidates.size() + 2
+               << " points exceed path.max_points=" << path_params.max_points
+               << "; reduce ROI or rounded_corner_point_count";
+        error = stream.str();
+        return result;
+    }
+
+    std::vector<WeldFeaturePoint> weld_points;
+    weld_points.reserve(candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        weld_points.push_back(candidates[i].feature);
+    }
+    result.reserve(weld_points.size() + 2);
+    result.push_back(makeSafeTransitionPoint(
+        weld_points.front(), true,
+        feature_params.safe_transition_offset_y,
+        feature_params.safe_transition_offset_z,
+        n_bottom, d_bottom, n_side, d_side, n_tangent));
+    result.insert(result.end(), weld_points.begin(), weld_points.end());
+    result.push_back(makeSafeTransitionPoint(
+        weld_points.back(), false,
+        feature_params.safe_transition_offset_y,
+        feature_params.safe_transition_offset_z,
+        n_bottom, d_bottom, n_side, d_side, n_tangent));
+
+    std::cout << "Rounded feature path: red_points=" << samples.size()
+        << ", detected_corners=" << corners.size()
+        << ", complete_5_point_corners=" << complete_corner_count
+        << ", boundary_single_corners=" << boundary_single_count
+        << ", straight_midpoints=" << straight_midpoint_count
+        << ", corner_spacing=" << path_params.rounded_corner_spacing << " mm"
+        << ", largest_gap=" << largest_gap << " mm"
+        << ", measured_weld_points=" << weld_points.size()
+        << ", total_path_points=" << result.size() << std::endl;
+    return result;
+}
+
 static const char* segmentTypeName(SeamSegmentType type)
 {
     if (type == SEGMENT_FLAT) return "flat";
@@ -2172,24 +2635,36 @@ static const char* torchPoseGroupName(TorchPoseGroup group)
     if (group == TORCH_PROTRUDING_LEFT) return "protruding_left";
     if (group == TORCH_PROTRUDING_RIGHT) return "protruding_right";
     if (group == TORCH_RECESSED_LEFT) return "recessed_left";
-    return "recessed_right";
+    if (group == TORCH_RECESSED_RIGHT) return "recessed_right";
+    if (group == TORCH_STRAIGHT_PROTRUDING_FLAT) return "straight_protruding_flat";
+    if (group == TORCH_STRAIGHT_LEFT_WAIST) return "straight_left_waist";
+    if (group == TORCH_STRAIGHT_RECESSED_FLAT) return "straight_recessed_flat";
+    return "straight_right_waist";
 }
 
 static bool validateTorchOrientationParams(const TorchOrientationParams& params)
 {
-    const float work_angles[4] = {
+    const float work_angles[8] = {
         params.protruding_left_work_angle_deg,
         params.protruding_right_work_angle_deg,
         params.recessed_left_work_angle_deg,
-        params.recessed_right_work_angle_deg
+        params.recessed_right_work_angle_deg,
+        params.straight_protruding_flat_work_angle_deg,
+        params.straight_left_waist_work_angle_deg,
+        params.straight_recessed_flat_work_angle_deg,
+        params.straight_right_waist_work_angle_deg
     };
-    const float lead_angles[4] = {
+    const float lead_angles[8] = {
         params.protruding_left_lead_angle_deg,
         params.protruding_right_lead_angle_deg,
         params.recessed_left_lead_angle_deg,
-        params.recessed_right_lead_angle_deg
+        params.recessed_right_lead_angle_deg,
+        params.straight_protruding_flat_lead_angle_deg,
+        params.straight_left_waist_lead_angle_deg,
+        params.straight_recessed_flat_lead_angle_deg,
+        params.straight_right_waist_lead_angle_deg
     };
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 8; ++i) {
         // 0°会使枪体贴平底板，90°完全竖直；均不作为本算法的有效调节范围端点。
         if (!std::isfinite(work_angles[i]) ||
             work_angles[i] <= 0.0f || work_angles[i] >= 90.0f) {
@@ -2198,6 +2673,23 @@ static bool validateTorchOrientationParams(const TorchOrientationParams& params)
         // 避免工具轴几乎与行进方向重合而导致工具横滚方向退化。
         if (!std::isfinite(lead_angles[i]) || std::abs(lead_angles[i]) >= 85.0f) {
             return false;
+        }
+        const float transition_work_angles[2] = {
+            work_angles[i] + params.start_transition_work_angle_offset_deg,
+            work_angles[i] + params.end_transition_work_angle_offset_deg
+        };
+        const float transition_lead_angles[2] = {
+            lead_angles[i] + params.start_transition_lead_angle_offset_deg,
+            lead_angles[i] + params.end_transition_lead_angle_offset_deg
+        };
+        for (int transition = 0; transition < 2; ++transition) {
+            if (!std::isfinite(transition_work_angles[transition]) ||
+                transition_work_angles[transition] <= 0.0f ||
+                transition_work_angles[transition] >= 90.0f ||
+                !std::isfinite(transition_lead_angles[transition]) ||
+                std::abs(transition_lead_angles[transition]) >= 85.0f) {
+                return false;
+            }
         }
     }
     if (params.tool_x_reference != "workpiece_x" &&
@@ -2210,6 +2702,10 @@ static bool validateTorchOrientationParams(const TorchOrientationParams& params)
 
 static TorchPoseGroup classifyTorchPoseGroup(const WeldFeaturePoint& feature)
 {
+    if (feature.pose_group_override >= TORCH_PROTRUDING_LEFT &&
+        feature.pose_group_override <= TORCH_STRAIGHT_RIGHT_WAIST) {
+        return static_cast<TorchPoseGroup>(feature.pose_group_override);
+    }
     const bool has_left_waist =
         feature.left_segment == SEGMENT_DIAGONAL_POSITIVE ||
         feature.right_segment == SEGMENT_DIAGONAL_POSITIVE;
@@ -2250,9 +2746,21 @@ static void getTorchGroupAngles(
     } else if (group == TORCH_RECESSED_LEFT) {
         work_angle_deg = params.recessed_left_work_angle_deg;
         lead_angle_deg = params.recessed_left_lead_angle_deg;
-    } else {
+    } else if (group == TORCH_RECESSED_RIGHT) {
         work_angle_deg = params.recessed_right_work_angle_deg;
         lead_angle_deg = params.recessed_right_lead_angle_deg;
+    } else if (group == TORCH_STRAIGHT_PROTRUDING_FLAT) {
+        work_angle_deg = params.straight_protruding_flat_work_angle_deg;
+        lead_angle_deg = params.straight_protruding_flat_lead_angle_deg;
+    } else if (group == TORCH_STRAIGHT_LEFT_WAIST) {
+        work_angle_deg = params.straight_left_waist_work_angle_deg;
+        lead_angle_deg = params.straight_left_waist_lead_angle_deg;
+    } else if (group == TORCH_STRAIGHT_RECESSED_FLAT) {
+        work_angle_deg = params.straight_recessed_flat_work_angle_deg;
+        lead_angle_deg = params.straight_recessed_flat_lead_angle_deg;
+    } else {
+        work_angle_deg = params.straight_right_waist_work_angle_deg;
+        lead_angle_deg = params.straight_right_waist_lead_angle_deg;
     }
 }
 
@@ -2398,6 +2906,46 @@ static WeldPoseData makeTorchPoseForCorner(
     return pose;
 }
 
+static WeldPoseData makeTorchPoseWithAngleOffsets(
+    const WeldFeaturePoint& feature,
+    const Eigen::Vector3f& n_bottom,
+    const Eigen::Vector3f& n_side,
+    const Eigen::Vector3f& n_tangent,
+    const TorchOrientationParams& params,
+    float work_angle_offset_deg,
+    float lead_angle_offset_deg)
+{
+    TorchOrientationParams adjusted = params;
+    const TorchPoseGroup group = classifyTorchPoseGroup(feature);
+    if (group == TORCH_PROTRUDING_LEFT) {
+        adjusted.protruding_left_work_angle_deg += work_angle_offset_deg;
+        adjusted.protruding_left_lead_angle_deg += lead_angle_offset_deg;
+    } else if (group == TORCH_PROTRUDING_RIGHT) {
+        adjusted.protruding_right_work_angle_deg += work_angle_offset_deg;
+        adjusted.protruding_right_lead_angle_deg += lead_angle_offset_deg;
+    } else if (group == TORCH_RECESSED_LEFT) {
+        adjusted.recessed_left_work_angle_deg += work_angle_offset_deg;
+        adjusted.recessed_left_lead_angle_deg += lead_angle_offset_deg;
+    } else if (group == TORCH_RECESSED_RIGHT) {
+        adjusted.recessed_right_work_angle_deg += work_angle_offset_deg;
+        adjusted.recessed_right_lead_angle_deg += lead_angle_offset_deg;
+    } else if (group == TORCH_STRAIGHT_PROTRUDING_FLAT) {
+        adjusted.straight_protruding_flat_work_angle_deg += work_angle_offset_deg;
+        adjusted.straight_protruding_flat_lead_angle_deg += lead_angle_offset_deg;
+    } else if (group == TORCH_STRAIGHT_LEFT_WAIST) {
+        adjusted.straight_left_waist_work_angle_deg += work_angle_offset_deg;
+        adjusted.straight_left_waist_lead_angle_deg += lead_angle_offset_deg;
+    } else if (group == TORCH_STRAIGHT_RECESSED_FLAT) {
+        adjusted.straight_recessed_flat_work_angle_deg += work_angle_offset_deg;
+        adjusted.straight_recessed_flat_lead_angle_deg += lead_angle_offset_deg;
+    } else {
+        adjusted.straight_right_waist_work_angle_deg += work_angle_offset_deg;
+        adjusted.straight_right_waist_lead_angle_deg += lead_angle_offset_deg;
+    }
+    return makeTorchPoseForCorner(
+        feature, n_bottom, n_side, n_tangent, adjusted);
+}
+
 static std::vector<WeldPoseData> buildOrderedWeldPoses(
     const std::vector<WeldFeaturePoint>& features,
     const Eigen::Vector3f& n_bottom,
@@ -2440,6 +2988,21 @@ static std::vector<WeldPoseData> buildOrderedWeldPoses(
                 }
             }
             poses[i] = poses[nearest_corner];
+            if (features[i].is_transition_point) {
+                const float work_offset = features[i].is_start_transition
+                    ? params.start_transition_work_angle_offset_deg
+                    : params.end_transition_work_angle_offset_deg;
+                const float lead_offset = features[i].is_start_transition
+                    ? params.start_transition_lead_angle_offset_deg
+                    : params.end_transition_lead_angle_offset_deg;
+                if (std::abs(work_offset) > 1e-6f ||
+                    std::abs(lead_offset) > 1e-6f) {
+                    poses[i] = makeTorchPoseWithAngleOffsets(
+                        features[nearest_corner],
+                        n_bottom, n_side, n_tangent, params,
+                        work_offset, lead_offset);
+                }
+            }
             poses[i].inherited_from_nearest_corner = true;
         } else {
             // 防御性回退：若上游异常地只给出过渡点，则使用开放侧默认45°姿态。
@@ -2491,6 +3054,10 @@ static bool validateFeaturePositionOffsets(
         isFiniteWorkpieceOffset(params.protruding_right) &&
         isFiniteWorkpieceOffset(params.recessed_left) &&
         isFiniteWorkpieceOffset(params.recessed_right) &&
+        isFiniteWorkpieceOffset(params.straight_protruding_flat) &&
+        isFiniteWorkpieceOffset(params.straight_left_waist) &&
+        isFiniteWorkpieceOffset(params.straight_recessed_flat) &&
+        isFiniteWorkpieceOffset(params.straight_right_waist) &&
         isFiniteWorkpieceOffset(params.adaptive_contour);
 }
 
@@ -2578,8 +3145,9 @@ static bool validateAdaptiveContourParams(
         return false;
     };
     if (params.mode != "feature_points" &&
-        params.mode != "adaptive_contour") {
-        return fail("path.mode must be feature_points or adaptive_contour.");
+        params.mode != "adaptive_contour" &&
+        params.mode != "rounded_features") {
+        return fail("path.mode must be feature_points, adaptive_contour or rounded_features.");
     }
     if (!std::isfinite(params.straight_spacing) ||
         !std::isfinite(params.corner_spacing) ||
@@ -2626,6 +3194,19 @@ static bool validateAdaptiveContourParams(
         std::abs(params.lead_angle_deg) >= 85.0f) {
         return fail("adaptive path work/lead angles are outside the safe numeric range.");
     }
+    if (params.rounded_corner_point_count < 1 ||
+        params.rounded_corner_point_count > 9 ||
+        params.rounded_corner_point_count % 2 == 0) {
+        return fail("path.rounded_corner_point_count must be an odd number within [1, 9].");
+    }
+    if (!std::isfinite(params.rounded_corner_spacing) ||
+        params.rounded_corner_spacing <= 0.0f ||
+        !std::isfinite(params.rounded_measured_search_radius) ||
+        params.rounded_measured_search_radius <= 0.0f ||
+        !std::isfinite(params.rounded_min_straight_span) ||
+        params.rounded_min_straight_span <= 0.0f) {
+        return fail("rounded feature spacing/search/span parameters must be finite and > 0.");
+    }
     return true;
 }
 
@@ -2639,7 +3220,16 @@ static WorkpieceOffset3f selectFeaturePositionOffset(
     else if (pose.group == TORCH_PROTRUDING_LEFT) offset = params.protruding_left;
     else if (pose.group == TORCH_PROTRUDING_RIGHT) offset = params.protruding_right;
     else if (pose.group == TORCH_RECESSED_LEFT) offset = params.recessed_left;
-    else offset = params.recessed_right;
+    else if (pose.group == TORCH_RECESSED_RIGHT) offset = params.recessed_right;
+    else if (pose.group == TORCH_STRAIGHT_PROTRUDING_FLAT) {
+        offset = params.straight_protruding_flat;
+    } else if (pose.group == TORCH_STRAIGHT_LEFT_WAIST) {
+        offset = params.straight_left_waist;
+    } else if (pose.group == TORCH_STRAIGHT_RECESSED_FLAT) {
+        offset = params.straight_recessed_flat;
+    } else {
+        offset = params.straight_right_waist;
+    }
 
     if (feature.is_transition_point) {
         // 安全点先继承相邻真实角点的四类偏置，再叠加首/末微调。这样当
@@ -2747,6 +3337,14 @@ static bool saveFeatureCsv(
         } else if (feature.is_contour_sample) {
             feature_type = "adaptive_contour_point";
             point_source = "robust_profile_adaptive_sampling";
+        } else if (feature.is_rounded_corner_sample) {
+            feature_type = std::string(torchPoseGroupName(pose.group)) +
+                "_rounded_corner_sample";
+            point_source = "measured_red_seam_point";
+        } else if (feature.is_straight_midpoint) {
+            feature_type = std::string(torchPoseGroupName(pose.group)) +
+                "_midpoint";
+            point_source = "measured_red_seam_point";
         } else {
             // 与四组姿态/位置偏置使用完全相同的物理分类名称，机械臂端无需
             // 再根据凹凸和腰线方向进行二次推断。
@@ -2766,7 +3364,12 @@ static bool saveFeatureCsv(
             : (pose.inherited_from_nearest_corner
                 ? "inherited_nearest_corner"
                 : (feature.is_contour_sample
-                    ? "local_contour_tangent" : "corner_geometry"));
+                    ? "local_contour_tangent"
+                    : (feature.is_straight_midpoint
+                        ? "straight_geometry_same_tool_frame"
+                        : (feature.is_rounded_corner_sample
+                            ? "inherited_four_type_corner_geometry"
+                            : "corner_geometry"))));
         const float orientation_delta = i == 0
             ? 0.0f : quaternionAngularDistanceDeg(poses[i - 1], pose);
         output << i << ','
@@ -3242,7 +3845,7 @@ static int executeWeldSeamExtraction(
     int normal_k_neighbors = 20;
     unsigned int normal_thread_count = 0;
 
-    // 3. 七组最终位置偏置（单位 mm），全部沿“工件右手坐标系”施加：
+    // 3. 最终位置偏置（单位 mm），全部沿“工件右手坐标系”施加：
     // +X = 焊缝 CSV 前进方向；+Y = 朝 L 侧板/开放侧；+Z = 离开蓝色底板向上。
     // 偏置不参与焊缝提取和凹凸判断，只改变最终 CSV、精确点 PLY 与粉红十字位置。
     // 每组独立生效，不要求当前视野必须拍到一个完整的四角波纹周期。
@@ -3271,6 +3874,11 @@ static int executeWeldSeamExtraction(
     position_offsets.recessed_right.x = 0.0f;
     position_offsets.recessed_right.y = 1.0f;
     position_offsets.recessed_right.z = 0.0f;
+    // rounded_features 的四类直线中点默认不偏移，可分别独立标定。
+    position_offsets.straight_protruding_flat = WorkpieceOffset3f();
+    position_offsets.straight_left_waist = WorkpieceOffset3f();
+    position_offsets.straight_recessed_flat = WorkpieceOffset3f();
+    position_offsets.straight_right_waist = WorkpieceOffset3f();
     // 连续轮廓模式默认不增加额外位置偏置，直接跟随鲁棒红色焊缝轮廓。
     position_offsets.adaptive_contour.x = 0.0f;
     position_offsets.adaptive_contour.y = 0.0f;
@@ -3300,8 +3908,9 @@ static int executeWeldSeamExtraction(
     feature_params.safe_transition_offset_y = 20.0f;
     feature_params.safe_transition_offset_z = 20.0f;
 
-    // 8. 路径输出模式。默认 feature_points 完全保留 2.2.2 行为；切换为
-    // adaptive_contour 后，沿红色焊缝轮廓按曲率自适应离散，且总点数硬限100。
+    // 8. 路径输出模式。默认 feature_points 完全保留 2.2.2 行为；
+    // rounded_features 输出每个完整圆角5个实测点和每段直线1个实测中点；
+    // adaptive_contour 保留原连续密集备用路径。所有模式总点数硬限100。
     AdaptiveContourParams adaptive_params;
 
     // 9. 焊枪姿态参数：四组分别对应“凸角左腰、凸角右腰、凹角左腰、凹角右腰”。
@@ -3313,12 +3922,20 @@ static int executeWeldSeamExtraction(
     torch_params.protruding_right_work_angle_deg = 45.0f;
     torch_params.recessed_left_work_angle_deg = 45.0f;
     torch_params.recessed_right_work_angle_deg = 45.0f;
+    torch_params.straight_protruding_flat_work_angle_deg = 45.0f;
+    torch_params.straight_left_waist_work_angle_deg = 45.0f;
+    torch_params.straight_recessed_flat_work_angle_deg = 45.0f;
+    torch_params.straight_right_waist_work_angle_deg = 45.0f;
 
     // lead_angle 为沿 CSV 焊接顺序的前倾/后倾角；0°最稳妥，正值向前倾，负值向后倾。
     torch_params.protruding_left_lead_angle_deg = 0.0f;
     torch_params.protruding_right_lead_angle_deg = 0.0f;
     torch_params.recessed_left_lead_angle_deg = 0.0f;
     torch_params.recessed_right_lead_angle_deg = 0.0f;
+    torch_params.straight_protruding_flat_lead_angle_deg = 0.0f;
+    torch_params.straight_left_waist_lead_angle_deg = 0.0f;
+    torch_params.straight_recessed_flat_lead_angle_deg = 0.0f;
+    torch_params.straight_right_waist_lead_angle_deg = 0.0f;
 
     // 必须与机器人中实际定义的焊枪工具 +Z 轴一致：
     // true 表示 +Z 从 TCP 指向枪体；若机器人 +Z 从枪体指向焊丝/TCP，则改为 false。
@@ -3409,15 +4026,31 @@ static int executeWeldSeamExtraction(
     APPLY_INT("path.max_points", adaptive_params.max_points);
     APPLY_FLOAT("path.work_angle_deg", adaptive_params.work_angle_deg);
     APPLY_FLOAT("path.lead_angle_deg", adaptive_params.lead_angle_deg);
+    APPLY_INT("path.rounded_corner_point_count", adaptive_params.rounded_corner_point_count);
+    APPLY_FLOAT("path.rounded_corner_spacing", adaptive_params.rounded_corner_spacing);
+    APPLY_FLOAT("path.rounded_measured_search_radius", adaptive_params.rounded_measured_search_radius);
+    APPLY_FLOAT("path.rounded_min_straight_span", adaptive_params.rounded_min_straight_span);
 
     APPLY_FLOAT("orientation.protruding_left.work_angle_deg", torch_params.protruding_left_work_angle_deg);
     APPLY_FLOAT("orientation.protruding_right.work_angle_deg", torch_params.protruding_right_work_angle_deg);
     APPLY_FLOAT("orientation.recessed_left.work_angle_deg", torch_params.recessed_left_work_angle_deg);
     APPLY_FLOAT("orientation.recessed_right.work_angle_deg", torch_params.recessed_right_work_angle_deg);
+    APPLY_FLOAT("orientation.straight_protruding_flat.work_angle_deg", torch_params.straight_protruding_flat_work_angle_deg);
+    APPLY_FLOAT("orientation.straight_left_waist.work_angle_deg", torch_params.straight_left_waist_work_angle_deg);
+    APPLY_FLOAT("orientation.straight_recessed_flat.work_angle_deg", torch_params.straight_recessed_flat_work_angle_deg);
+    APPLY_FLOAT("orientation.straight_right_waist.work_angle_deg", torch_params.straight_right_waist_work_angle_deg);
     APPLY_FLOAT("orientation.protruding_left.lead_angle_deg", torch_params.protruding_left_lead_angle_deg);
     APPLY_FLOAT("orientation.protruding_right.lead_angle_deg", torch_params.protruding_right_lead_angle_deg);
     APPLY_FLOAT("orientation.recessed_left.lead_angle_deg", torch_params.recessed_left_lead_angle_deg);
     APPLY_FLOAT("orientation.recessed_right.lead_angle_deg", torch_params.recessed_right_lead_angle_deg);
+    APPLY_FLOAT("orientation.straight_protruding_flat.lead_angle_deg", torch_params.straight_protruding_flat_lead_angle_deg);
+    APPLY_FLOAT("orientation.straight_left_waist.lead_angle_deg", torch_params.straight_left_waist_lead_angle_deg);
+    APPLY_FLOAT("orientation.straight_recessed_flat.lead_angle_deg", torch_params.straight_recessed_flat_lead_angle_deg);
+    APPLY_FLOAT("orientation.straight_right_waist.lead_angle_deg", torch_params.straight_right_waist_lead_angle_deg);
+    APPLY_FLOAT("orientation.start_transition.work_angle_offset_deg", torch_params.start_transition_work_angle_offset_deg);
+    APPLY_FLOAT("orientation.start_transition.lead_angle_offset_deg", torch_params.start_transition_lead_angle_offset_deg);
+    APPLY_FLOAT("orientation.end_transition.work_angle_offset_deg", torch_params.end_transition_work_angle_offset_deg);
+    APPLY_FLOAT("orientation.end_transition.lead_angle_offset_deg", torch_params.end_transition_lead_angle_offset_deg);
     APPLY_BOOL("orientation.tool_positive_z_points_from_tcp_to_body", torch_params.tool_positive_z_points_from_tcp_to_body);
     APPLY_STRING("orientation.tool_x_reference", torch_params.tool_x_reference);
     APPLY_BOOL("orientation.tool_x_points_along_positive_workpiece_x", torch_params.tool_x_points_along_positive_workpiece_x);
@@ -3433,6 +4066,10 @@ static int executeWeldSeamExtraction(
     APPLY_OFFSET("protruding_right", protruding_right);
     APPLY_OFFSET("recessed_left", recessed_left);
     APPLY_OFFSET("recessed_right", recessed_right);
+    APPLY_OFFSET("straight_protruding_flat", straight_protruding_flat);
+    APPLY_OFFSET("straight_left_waist", straight_left_waist);
+    APPLY_OFFSET("straight_recessed_flat", straight_recessed_flat);
+    APPLY_OFFSET("straight_right_waist", straight_right_waist);
     APPLY_OFFSET("adaptive_contour", adaptive_contour);
 
 #undef APPLY_OFFSET
@@ -4061,14 +4698,25 @@ static int executeWeldSeamExtraction(
     const std::chrono::steady_clock::time_point primary_end_time =
         std::chrono::steady_clock::now();
 
-    // 6.1 两种路径模式都只消费上面已经稳定得到的红色焊缝点。
-    // feature_points 保留四类拐点；adaptive_contour 沿真实轮廓自适应离散。
+    // 6.1 三种路径模式都只消费上面已经稳定得到的红色焊缝点。
+    // feature_points 保留四类单点；rounded_features 复用相同四类姿态并在
+    // 圆角/直线中点选择实测红点；adaptive_contour 保留连续密集备用路径。
     const std::chrono::steady_clock::time_point feature_start_time =
         std::chrono::steady_clock::now();
     std::vector<WeldFeaturePoint> feature_points;
     std::string path_error;
     if (adaptive_params.mode == "adaptive_contour") {
         feature_points = extractAdaptiveContourPath(
+            cloud_filtered, is_final_seam,
+            N_bottom, D_bottom, N_side, D_side, N_tangent,
+            feature_params, adaptive_params, path_error);
+        if (!path_error.empty()) {
+            run_result.message = path_error;
+            std::cerr << run_result.message << std::endl;
+            return -1;
+        }
+    } else if (adaptive_params.mode == "rounded_features") {
+        feature_points = extractRoundedFeaturePath(
             cloud_filtered, is_final_seam,
             N_bottom, D_bottom, N_side, D_side, N_tangent,
             feature_params, adaptive_params, path_error);
@@ -4250,6 +4898,8 @@ static int executeWeldSeamExtraction(
     int inferred_recessed_count = 0;
     int transition_count = 0;
     int contour_sample_count = 0;
+    int rounded_corner_sample_count = 0;
+    int straight_midpoint_count = 0;
     float maximum_orientation_step_deg = 0.0f;
     for (size_t i = 0; i < feature_points.size(); ++i) {
         const WeldFeaturePoint& feature = feature_points[i];
@@ -4258,6 +4908,8 @@ static int executeWeldSeamExtraction(
             selectFeaturePositionOffset(feature, pose, position_offsets);
         if (feature.is_transition_point) ++transition_count;
         else if (feature.is_contour_sample) ++contour_sample_count;
+        else if (feature.is_rounded_corner_sample) ++rounded_corner_sample_count;
+        else if (feature.is_straight_midpoint) ++straight_midpoint_count;
         else if (feature.protruding) ++protruding_count;
         else if (feature.measured_on_arc) ++measured_recessed_count;
         else ++inferred_recessed_count;
@@ -4271,6 +4923,12 @@ static int executeWeldSeamExtraction(
         } else if (feature.is_contour_sample) {
             feature_name = "ADAPTIVE_CONTOUR_POINT";
             source_name = "robust profile adaptive sampling";
+        } else if (feature.is_rounded_corner_sample) {
+            feature_name = "ROUNDED_CORNER_SAMPLE";
+            source_name = "measured red seam point; four-type corner pose";
+        } else if (feature.is_straight_midpoint) {
+            feature_name = "STRAIGHT_MIDPOINT";
+            source_name = "measured red seam point; same tool-frame convention";
         } else {
             feature_name = feature.protruding ? "PROTRUDING_CORNER" : "RECESSED_CORNER";
             if (feature.topology_inferred) {
@@ -4291,7 +4949,12 @@ static int executeWeldSeamExtraction(
             : (pose.inherited_from_nearest_corner
                 ? "inherited_nearest_corner"
                 : (feature.is_contour_sample
-                    ? "local_contour_tangent" : "corner_geometry"));
+                    ? "local_contour_tangent"
+                    : (feature.is_straight_midpoint
+                        ? "straight_geometry_same_tool_frame"
+                        : (feature.is_rounded_corner_sample
+                            ? "inherited_four_type_corner_geometry"
+                            : "corner_geometry"))));
         const float orientation_delta = i == 0
             ? 0.0f : quaternionAngularDistanceDeg(feature_poses[i - 1], pose);
         maximum_orientation_step_deg = std::max(
@@ -4331,6 +4994,8 @@ static int executeWeldSeamExtraction(
     std::cout << "Ordered robot path points: " << feature_points.size()
         << " (safe transitions=" << transition_count
         << ", adaptive contour samples=" << contour_sample_count
+        << ", rounded corner samples=" << rounded_corner_sample_count
+        << ", straight midpoints=" << straight_midpoint_count
         << ", protruding corners=" << protruding_count
         << ", recessed measured corners=" << measured_recessed_count
         << ", recessed safe fallbacks=" << inferred_recessed_count << ")" << std::endl;
@@ -4338,6 +5003,12 @@ static int executeWeldSeamExtraction(
         std::cout << "Adaptive contour weld samples: "
             << contour_sample_count << " (path.max_points="
             << adaptive_params.max_points << ", including transitions)" << std::endl;
+    } else if (adaptive_params.mode == "rounded_features") {
+        std::cout << "Rounded feature weld points: corner_samples="
+            << rounded_corner_sample_count
+            << ", straight_midpoints=" << straight_midpoint_count
+            << " (all are measured red seam points before configured offsets)"
+            << std::endl;
     } else {
         std::cout << "Four-type weld feature points: "
             << (feature_points.size() >= static_cast<size_t>(transition_count)
@@ -4407,7 +5078,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.3.1";
+    return "2.4.0";
 }
 
 std::string weld_seam_sdk::commandLineHelp()

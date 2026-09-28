@@ -1,6 +1,6 @@
 # weld_seam_perception 包说明
 
-该包是焊缝 SDK 2.3.1 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。
+该包是焊缝 SDK 2.4.0 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。
 
 ## 文件作用
 
@@ -75,11 +75,14 @@ ROI、四类位置偏置、四类姿态等均可继续添加，不用重新编�
 # 现场已验证的四类拐点模式（默认）
 - "path.mode=feature_points"
 
+# 稀疏圆角模式：旧四类姿态坐标系，圆角5个实测点、直线段1个实测中点
+- "path.mode=rounded_features"
+
 # 曲率轮廓备用模式；ROS话题、CSV列、手眼和ABB协议均不变
 - "path.mode=adaptive_contour"
 ```
 
-两行不能同时启用。连续模式默认按直线约 12 mm、曲率区约 4 mm 采样，并把首末安全点计入 100 点硬上限；`handeye_abb_bridge_node` 还会在发送前再次拒绝超过 100 点的 PoseArray。SDK 2.3.1 还默认使用 `path.orientation_smoothing_radius=20.0` 和 `path.max_orientation_step_deg=6.0` 平滑焊枪姿态，不改变采样点 XYZ。`path.work_angle_deg` 是连续模式的独立工作角，不读取四类 `orientation.*.work_angle_deg`。
+三行只能启用一行。`rounded_features` 默认每个完整圆角 5 点、目标弧长间距 2 mm、每段有效直线 1 个中点；边界或点云缺测不足以支撑 5 点时只保留中心实测点。三种模式都计入首末安全点并受 100 点硬上限保护；`handeye_abb_bridge_node` 发送前还会再次拒绝超过 100 点的 PoseArray。ROS 仍按列名读取 `x,y,z,qw,qx,qy,qz`，手眼和 ABB 协议不变。
 
 ## 构建
 
