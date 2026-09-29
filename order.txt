@@ -635,6 +635,8 @@ cmake --build ~/x86_ros2_ws/x86_weld_seam_test/build -j2
 # ------------------------------------------------------------
 # 终端A：只启动软件算法节点；不启动camera/handeye/coordinator/ABB等节点。
 # 使用独立ROS_DOMAIN_ID=232，避免与现场默认Domain中的硬件节点互相发现。
+# 输入、输出和全部算法参数只使用src中的ROS2 YAML；不再覆盖输出目录，
+# 结果写入/home/mini/scut_weld_data/weld_results。
 cd ~/x86_ros2_ws
 source /opt/ros/humble/setup.bash
 source ~/x86_ros2_ws/install/setup.bash
@@ -642,8 +644,7 @@ export ROS_DOMAIN_ID=232
 export ROS_LOG_DIR=/tmp/ros2_weld_offline_logs
 mkdir -p "$ROS_LOG_DIR"
 ros2 run weld_seam_perception weld_seam_node --ros-args \
-  --params-file ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml \
-  -p output_directory:=/tmp/weld_ros_offline
+  --params-file ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
 
 # 终端B：先等待一次处理状态；必须在终端C发布PLY路径前启动。
 source /opt/ros/humble/setup.bash
@@ -661,7 +662,7 @@ ros2 topic pub --once \
   --qos-durability transient_local \
   --qos-reliability reliable \
   /camera/pointcloud_file std_msgs/msg/String \
-  "{data: '/home/mini/scut_weld_data/pointclouds/capture_1789700756976.ply'}"
+  "{data: '/home/mini/scut_weld_data/pointclouds/capture_1790215929417.ply'}"
 
 # 终端C：发布完成后继续查看本次离线处理输出；下面三个结果话题具有
 # transient_local持久性，因此算法已经处理完后再执行也能读到最后一条消息。
@@ -671,48 +672,28 @@ ros2 topic echo --once --qos-durability transient_local --qos-reliability reliab
   /weld_seam/result_visualization
 ros2 topic echo --once --qos-durability transient_local --qos-reliability reliable \
   /weld_seam/poses_camera_frame
-ls -lh /tmp/weld_ros_offline
+ls -lh /home/mini/scut_weld_data/weld_results
 
 # 提示：algorithm_overrides中的参数在节点启动时读取。
 # 修改src/weld_seam_perception/config/weld_seam.yaml后，无需重新编译，
 # 但必须Ctrl+C停止终端A并重新运行节点，新的参数才会生效。
 
 # ------------------------------------------------------------
-# 14.3 三种焊缝路径模式的离线切换（不连接/不驱动任何硬件）
+# 14.3 三种焊缝路径模式的离线切换（统一使用ROS2 YAML）
 # ------------------------------------------------------------
-# 默认现场模式：四类拐点 + 2个安全点。
-~/x86_ros2_ws/x86_weld_seam_test/build/weld_seam_extractor \
-  /home/mini/scut_weld_data/pointclouds/capture_1790145455454.ply \
-  /tmp/weld_path_compare feature_points \
-  --config ~/x86_ros2_ws/x86_weld_seam_test/config/default.conf \
-  --set path.mode=feature_points
-
-# 备用模式：沿鲁棒红色轮廓离散；默认直线约12mm、曲率处约4mm，
-# 总数包含首末安全点且最多100。该连续分支默认只对姿态切线做20mm弧长
-# 平滑并把相邻切线变化限制为6°，不会移动焊缝点XYZ。
-# 先看CSV和result.ply，禁止直接自动运动。
-~/x86_ros2_ws/x86_weld_seam_test/build/weld_seam_extractor \
-  /home/mini/scut_weld_data/pointclouds/capture_1790145455454.ply \
-  /tmp/weld_path_compare adaptive_contour \
-  --config ~/x86_ros2_ws/x86_weld_seam_test/config/default.conf \
-  --set path.mode=adaptive_contour
-
-# 推荐备用模式：复用现场 feature_points 的工具坐标系和四类工艺角；
-# 完整圆角5个真实红点（默认目标间距2mm），每段直线1个真实中点；
-# 边界/空洞无法可靠支撑5点时只保留圆角中心1个真实点。
-~/x86_ros2_ws/x86_weld_seam_test/build/weld_seam_extractor \
-  /home/mini/scut_weld_data/pointclouds/capture_1790145455454.ply \
-  /tmp/weld_path_compare rounded_features \
-  --config ~/x86_ros2_ws/x86_weld_seam_test/config/default.conf \
-  --set path.mode=rounded_features
-
-ls -lh /tmp/weld_path_compare
-# ROS/launch模式只改下面文件中唯一一行，修改后重启launch，无需重新编译：
-# ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
+# 三种模式不再通过独立程序的default.conf切换，统一修改：
+# ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml 中唯一的path.mode。
 # - "path.mode=feature_points"       # 已有现场模式
 # - "path.mode=rounded_features"     # 稀疏圆角5点 + 直线中点（推荐备用）
 # - "path.mode=adaptive_contour"     # 备用连续轮廓模式
-# 注意：三行只能启用一行；任何新模式先离线看CSV/result.ply并低速验证。
+# 每次只保留一条启用值，Ctrl+C重启14.2终端A，再重复终端B的历史PLY发布命令。
+# 三种模式会生成同名文件；对比前把结果复制成带模式名的文件，避免下次覆盖：
+cp /home/mini/scut_weld_data/weld_results/weld_seam_capture_1790215929417_features.csv \
+  /home/mini/scut_weld_data/weld_results/rounded_features_capture_1790215929417_features.csv
+cp /home/mini/scut_weld_data/weld_results/weld_seam_capture_1790215929417_result.ply \
+  /home/mini/scut_weld_data/weld_results/rounded_features_capture_1790215929417_result.ply
+# 把上面目标文件名中的rounded_features改成实际测试模式名。
+# 任何新模式必须先检查CSV/result.ply，之后才允许进行机器人低速验证。
 
 # ------------------------------------------------------------
 # 14.4 版本检查和历史回退位置

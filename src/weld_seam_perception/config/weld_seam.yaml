@@ -1,22 +1,67 @@
 weld_seam_node:
   ros__parameters:
+    # ==================== ROS2 节点输入、输出与离线测试 ====================
+    # 本文件是 ROS2 焊缝节点和 camera_weld_* launch 的参数源。
+    # 修改本文件后只需 Ctrl+C 停止并重新启动节点/launch，不需要重新编译。
+    # launch 不应再写同名参数覆盖这里的值，否则现场调参会出现“修改未生效”。
+    #
+    # 不连接相机、ABB、焊机或电机时，可以用历史 PLY 完整验证本文件：
+    #
+    # 终端A（只启动焊缝软件节点）：
+    #   cd /home/mini/x86_ros2_ws
+    #   source /opt/ros/humble/setup.bash
+    #   source /home/mini/x86_ros2_ws/install/setup.bash
+    #   export ROS_DOMAIN_ID=232
+    #   ros2 run weld_seam_perception weld_seam_node --ros-args \
+    #     --params-file /home/mini/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
+    #
+    # 终端B（把历史文件路径作为消息送给算法，不会访问相机）：
+    #   source /opt/ros/humble/setup.bash
+    #   source /home/mini/x86_ros2_ws/install/setup.bash
+    #   export ROS_DOMAIN_ID=232
+    #   ros2 topic pub --once --qos-durability transient_local \
+    #     --qos-reliability reliable /camera/pointcloud_file std_msgs/msg/String \
+    #     "{data: '/home/mini/scut_weld_data/pointclouds/capture_1790215929417.ply'}"
+    #
+    # 结果自动写入 /home/mini/scut_weld_data/weld_results：
+    #   weld_seam_capture_..._features.csv       精确路径点、姿态和诊断字段
+    #   weld_seam_capture_..._feature_points.ply 仅路径标记点
+    #   weld_seam_capture_..._result.ply         原点云、红焊缝、粉路径点、白工具轴
+    # 同一输入文件重复运行会覆盖同名结果；需要保留多组对比时先复制或改 output_prefix。
+    # ROS_DOMAIN_ID=232 仅用于把离线测试与默认现场网络隔离，两个终端必须保持一致。
+
+    # 相机节点正常拍照时发布 PLY 的绝对路径；离线时由上面的 topic 命令代替相机。
     input_ply_topic: "/camera/pointcloud_file"
-    # 空字符串 => $SCUT_WELD_DATA_ROOT/weld_results；未设环境变量时
-    # => ~/scut_weld_data/weld_results。运行数据不写入 ROS install/share。
-    output_directory: ""
+    # 明确写成绝对路径，保证现场 launch 和离线测试都生成到同一数据目录。
+    # 不要写进 src、build 或 install；这些目录只放源码和构建产物。
+    output_directory: "/home/mini/scut_weld_data/weld_results"
+    # 实际前缀还会自动追加输入 PLY 文件名，例如：
+    # weld_seam_capture_1790215929417_features.csv。
     output_prefix: "weld_seam"
+    # 留空表示不再读取独立工程的 default.conf；需要现场调整的参数只写在本
+    # YAML 的 algorithm_overrides，未列出的参数继续使用SDK编译默认值。
+    # 这样可避免维护两份配置。确需加载.conf时，algorithm_overrides仍具有
+    # 更高优先级，会覆盖其中同名参数。
     config_file: ""
+    # 算法和 CSV 的 XYZ/q 均在相机/PLY坐标系；这里是发布 PoseArray 的 frame_id。
+    # 本节点不做手眼变换，handeye_abb_bridge_node 才转换到 robot_base。
     frame_id: "camera_link"
-    # 算法 CSV 是 mm，ROS2 PoseArray 按 REP-103 发布为 m。
+    # 算法 PLY/CSV 位置单位是 mm；ROS2 PoseArray 按 REP-103 发布为 m。
+    # 四元数不缩放：CSV 顺序 qw,qx,qy,qz，ROS Pose 字段按 w,x,y,z 正确映射。
     position_scale_to_ros: 0.001
+    # true：收到一条 PLY 路径便立即处理。false：只记录路径，随后必须调用
+    # ros2 service call /weld_seam/extract_latest std_srvs/srv/Trigger '{}'
     auto_process: true
 
-    # SDK 参数使用说明：
-    # 1. 每项必须是完整字符串：- "key=value"。
-    # 2. 当前现场参数原样保留；新增 path.mode 显式锁定已有拐点模式。
-    # 3. 其余是 SDK 2.4.0 默认值模板；删掉行首的 "# " 即可启用。
-    # 4. 不要同时启用同一 key 的多行；修改后重启节点/launch 生效，无需编译。
-    # 5. config_file 非空时先读外部 .conf，algorithm_overrides 再覆盖同名项。
+    # SDK 参数使用规则：
+    # 1. 每项必须是 YAML 字符串，格式严格为：- "key=value"。
+    # 2. 没有行首“#”的是当前真正生效值；带“#”的是模板和默认值说明。
+    # 3. 启用模板时删除整行开头的“# ”，不要只删除字符串内部字符。
+    # 4. 同一个 key 只能保留一条启用值，避免后写值覆盖前写值造成误判。
+    # 5. 修改后必须重启节点/launch；仅改本 YAML 不需要 colcon build。
+    # 6. 参数优先级：SDK编译默认值 < config_file < algorithm_overrides。
+    # 7. 长度默认单位为 mm，角度默认单位为 deg，比例/点积/分位数无量纲。
+    # 8. 调参先用历史PLY离线比较 CSV/result.ply，再进行机器人低速验证。
     algorithm_overrides:
       # ==================== 当前现场已启用值 ====================
       - "roi.enable=true"
@@ -26,27 +71,40 @@ weld_seam_node:
       # 当前 false 表示工具 +X 指向工件 -X；如需反转，只在 false/true 之间切换。
       - "orientation.tool_x_reference=workpiece_x"
       - "orientation.tool_x_points_along_positive_workpiece_x=false"
-      # 默认继续使用已经现场验证的四类拐点路径。新稀疏圆角模式改为
-      # rounded_features；原连续密集备用模式仍可改为 adaptive_contour。
-      - "path.mode=feature_points"
+      # 当前启用 rounded_features：圆角5个实测点 + 每段直线1个实测中点。
+      # 改为 feature_points 可回到旧四类单拐点模式；改为 adaptive_contour
+      # 可使用连续轮廓自适应采样。只修改等号右侧，不要同时写多条 path.mode。
+      - "path.mode=rounded_features"
 
       # ==================== ROI（相机/PLY 坐标系，mm） ====================
-      # roi.enable=true 时下面的边界参与过滤。
-      # 启用 ROI 前建议同时确认 X/Y/Z 六个边界；-inf/inf 表示不限制。
-      - "roi.min_x=-190.90"
-      - "roi.max_x=185.07"
-      - "roi.min_y=-36.85"
-      - "roi.max_y=158.20"
+      # ROI 是相机/PLY坐标系下的轴对齐长方体，不是工件局部坐标系或 robot_base。
+      # roi.enable=true 时六个边界参与过滤；-inf/inf 表示该方向不裁剪。
+      # 当前虽然 enable=true，但六项均为无限，因此效果等同于保留完整点云。
+      # 收紧 ROI 可去掉背景并稳定周期识别，但必须同时保留：蓝色底面、L侧面和
+      # 需要焊接的完整红色轮廓。切掉角点两侧支撑会使5点圆角退化为单点。
+      - "roi.min_x=-inf"
+      - "roi.max_x=inf"
+      - "roi.min_y=-inf"
+      - "roi.max_y=inf"
       - "roi.min_z=-inf"
       - "roi.max_z=inf"
 
       # ==================== 法向量 ====================
-      # normal.mode: auto（优先复用，质量不足则重算）/recompute/reuse。
+      # normal.mode=auto：输入法向有效率达到阈值就复用，否则自动重算（推荐）。
+      # recompute：无论输入是否带法向都重算，较慢但便于排查法向质量问题。
+      # reuse：强制复用；输入无有效法向时直接失败，不建议现场默认使用。
+      # reuse_min_valid_ratio 是复用所需最小有效比例；k_neighbors 是重算邻域点数；
+      # thread_count=0 表示由算法自动选择线程数。
       # - "normal.reuse_min_valid_ratio=0.995"
       # - "normal.k_neighbors=20"
       # - "normal.thread_count=0"
 
       # ==================== 主焊缝/平面搜索（长度 mm） ====================
+      # z_filter_threshold：靠近底面的高度筛选阈值；过小可能丢焊缝，过大会混入底面。
+      # y_filter_threshold：去掉贴近L侧面的候选点，避免侧板被误认为焊缝。
+      # plane_search_leaf_size：RANSAC平面搜索的辅助体素；越大越快但细节更少。
+      # plane_search_min_inliers：平面最少内点数；ROI很小时可能需要降低。
+      # side_origin_low_quantile：L侧面原点使用的低分位，通常不要现场随意修改。
       # - "primary.z_filter_threshold=0.5"
       # - "primary.y_filter_threshold=2.0"
       # - "primary.plane_search_leaf_size=1.0"
@@ -54,7 +112,18 @@ weld_seam_node:
       # - "primary.side_origin_low_quantile=0.002"
 
       # ==================== 波纹板特征点提取 ====================
+      # 这些参数先提取稳定的红色焊缝和四类周期角点，三种 path.mode 都会复用
+      # 其中一部分。红色焊缝正确而角点缺失时再调本组，不要先改姿态参数。
       # 长度/距离参数均为 mm；比例、点积和分位数无量纲。
+      # profile_bin_width：沿焊接方向的轮廓分箱宽度；减小保留更多细节但更敏感。
+      # flat/diagonal_normal_dot_min：平段/腰段法向分类阈值。
+      # bin_label_vote_ratio：单个分箱分类所需投票比例。
+      # min_segment_bins/min_segment_span：有效直线段的最少分箱数/最短长度。
+      # local_fit_*：角点两侧局部直线拟合窗口、半径和最大中位残差。
+      # flat/waist_segment_max_length：周期拓扑允许的平段/腰段最大长度。
+      # max_hole_bridge：角点检测允许连接的缺测区；过大会跨越真实未知区域。
+      # max_corner_extrapolation：只允许在红色轮廓边缘附近补全周期边界角。
+      # min_corner_angle_deg：过小转角不认为是物理拐角。
       # - "feature.profile_bin_width=0.8"
       # - "feature.flat_normal_dot_min=0.80"
       # - "feature.diagonal_normal_dot_min=0.12"
@@ -70,11 +139,14 @@ weld_seam_node:
       # - "feature.max_hole_bridge=70.0"
       # - "feature.max_corner_extrapolation=18.0"
       # - "feature.min_corner_angle_deg=10.0"
-      # 同时作为相邻物理角最小安全间距，抑制短假线段插入多余点。
+      # duplicate_corner_merge_distance 同时作为相邻物理角最小安全间距，
+      # 增大可合并近邻假角，但过大会错误合并两个真实角；不要只为补首末点盲目增大。
       # - "feature.duplicate_corner_merge_distance=18.0"
       # - "feature.corner_fit_support_distance=5.0"
       # - "feature.recessed_chord_search_radius=7.0"
-      # 安全过渡点相对相邻角点的工件 +Y/+Z 生成偏移，不是下方 offset.* 的额外偏移。
+      # safe_transition_offset_y/z 用相邻首/末焊点生成非焊接安全点：沿工件
+      # +Y远离L侧板、沿+Z抬高。它们是安全点的几何避让距离；下方
+      # offset.start/end_transition.* 是在此基础上的额外微调，两者含义不同。
       # - "feature.safe_transition_offset_y=20.0"
       # - "feature.safe_transition_offset_z=20.0"
       # - "feature.recessed_arc_search_radius=10.0"
@@ -84,10 +156,13 @@ weld_seam_node:
       # - "feature.protruding_is_larger_local_y=false"
 
       # ==================== 路径输出模式（SDK 2.4.0） ====================
-      # path.mode=feature_points：原四类拐点 + 首末安全点（默认，现场稳定模式）。
+      # path.mode=feature_points：每个识别拐角1点 + 首末安全点（旧现场模式）。
       # path.mode=rounded_features：复用旧四类姿态坐标系；完整圆角5个实测点，
       # 每段真实直线1个实测中点；边界/缺测圆角只保留中心1个实测点。
       # path.mode=adaptive_contour：沿红色焊缝轮廓自适应离散；直线稀、曲率处密。
+      # 三种模式的输出 CSV/PoseArray/手眼/ABB 接口完全相同，只是点数和采样方式不同。
+      #
+      # 以下 straight_spacing 到 max_orientation_step_deg 主要作用于 adaptive_contour：
       # - "path.straight_spacing=12.0"
       # - "path.corner_spacing=4.0"
       # 曲率点前后此弧长范围内，由密集点距逐渐过渡到直线点距。
@@ -100,33 +175,47 @@ weld_seam_node:
       # - "path.orientation_smoothing_radius=20.0"
       # 对相邻轮廓点的切线角做双向限幅；默认6°，最终四元数变化通常更小。
       # - "path.max_orientation_step_deg=6.0"
-      # 中值离群检查窗口；点焊飞溅/孤立突起偏离局部中值超过 3mm 时被替换。
+      # smoothing_half_window_bins/outlier_max_distance 同时用于构造稳健轮廓：
+      # 点焊飞溅或孤立突起偏离局部中值超过阈值时会被抑制。
       # - "path.smoothing_half_window_bins=8"
       # - "path.outlier_max_distance=3.0"
       # 小空洞在相邻鲁棒轮廓点之间插值；大于该值直接报错，禁止跨未知区域焊接。
       # - "path.max_bridge_gap=15.0"
-      # 包含首末两个安全过渡点；ABB 当前硬上限为 100，SDK 不允许配置得更大。
+      # 包含首末两个安全过渡点；ABB 当前硬上限为100。超限时整次提取失败，
+      # SDK不会静默截断轨迹，也不会向ABB发送不完整路径。
       # - "path.max_points=100"
-      # 连续轮廓全部焊接点使用独立统一工艺角；不会读取下面四类拐点的角度。
+      # path.work/lead_angle_deg 只作用于 adaptive_contour 的全部连续采样点；
+      # feature_points/rounded_features 使用下面按类别划分的 orientation.*。
       # - "path.work_angle_deg=43.0"
       # - "path.lead_angle_deg=0.0"
-      # rounded_features 专用。2mm 是沿稳健轮廓弧长的目标间距，最终位置从
-      # 红色实测点中选取，所以实际相邻距离会随点云密度略有变化。
+      # 以下四项只作用于 rounded_features：
+      # point_count 必须是1~9内奇数。5表示中心点前后各2点；增至7可把总转角
+      # 分到更多姿态点，但会增加ABB点数，且要求圆角两侧有更多完整实测支撑。
+      # spacing=2mm 是沿稳健轮廓弧长的目标间距；5点覆盖中心前后约4mm。
+      # 最终坐标从红色实测点中选择，所以实际间距会随点云密度略有变化。
       # - "path.rounded_corner_point_count=5"
       # - "path.rounded_corner_spacing=2.0"
+      # measured_search_radius 是目标弧长附近寻找真实红点的最大范围；过小会使
+      # 5点圆角回退成单点，过大可能跨到不应选择的邻近轮廓，默认6mm先不改。
       # - "path.rounded_measured_search_radius=6.0"
-      # 小于此有效弧长的直线段不强行增加中点。
+      # 去除相邻圆角覆盖范围后，剩余直线有效弧长小于此值就不增加中点。
+      # 一个完整四角周期通常是20个圆角点+4个直线中点+2个首末安全点=26点；
+      # ROI包含多个周期时按实际角点数增加，但总数仍受 max_points=100 约束。
       # - "path.rounded_min_straight_span=8.0"
 
       # ==================== 各类焊接点姿态（度） ====================
-      # work_angle_deg 必须在 (0, 90)；lead_angle_deg 绝对值必须 < 85。
-      # left/right 是算法识别的角点类型，不是机器人基坐标方向。
+      # work_angle：焊枪中心轴与工件底板平面的夹角，必须在(0,90)度。
+      # lead_angle：沿CSV焊接顺序前倾/后倾，正值向前、负值向后，绝对值<85度。
+      # left/right 是沿算法轮廓顺序识别的腰线类型，不是机器人基坐标左右。
+      # rounded_features 的每组5点在角点两侧稳健直线姿态间分摊转角；它不会读取
+      # adaptive_contour 的 max_orientation_step_deg。若单步姿态仍大，可先比较
+      # point_count=7，再检查相邻类别 work/lead 是否人为设置差别过大。
       - "orientation.protruding_left.work_angle_deg=35.0"
       - "orientation.protruding_right.work_angle_deg=35.0"
       - "orientation.recessed_left.work_angle_deg=35.0"
       - "orientation.recessed_right.work_angle_deg=35.0"
-      # rounded_features 的四类直线中点也使用同一工具坐标系构造规则；这里
-      # 显式设为当前现场35°，以后可按四种物理线段分别微调。
+      # rounded_features 的四类直线中点也使用与旧版相同的 Tool X/Tool Z
+      # 坐标系构造规则；这里显式设为当前现场35°，可按四种物理线段分别微调。
       - "orientation.straight_protruding_flat.work_angle_deg=35.0"
       - "orientation.straight_left_waist.work_angle_deg=35.0"
       - "orientation.straight_recessed_flat.work_angle_deg=35.0"
@@ -139,17 +228,25 @@ weld_seam_node:
       # - "orientation.straight_left_waist.lead_angle_deg=0.0"
       # - "orientation.straight_recessed_flat.lead_angle_deg=0.0"
       # - "orientation.straight_right_waist.lead_angle_deg=0.0"
-      # 安全点默认严格继承相邻焊点；下面是只作用于首/末安全点的角度增量。
+      # 安全点默认严格继承相邻首/末焊点；下面四项是在继承姿态上的角度增量。
+      # 它们不会修改相邻焊接点，建议保持0，只有安全接近/退出确有需要时才微调。
       # - "orientation.start_transition.work_angle_offset_deg=0.0"
       # - "orientation.start_transition.lead_angle_offset_deg=0.0"
       # - "orientation.end_transition.work_angle_offset_deg=0.0"
       # - "orientation.end_transition.lead_angle_offset_deg=0.0"
-      # tool_x_reference 可选 workpiece_x 或 corner_bisector（当前已启用 workpiece_x）。
-      # tool_positive_z... 与 tool_x... 两项方向开关已在上方启用，勿在此重复添加。
+      # tool_x_reference=workpiece_x：工具X固定沿焊接前进轴，减少绕枪轴滚转（推荐）。
+      # corner_bisector：复现旧角平分线Tool X，可能导致不同角点间较大滚转。
+      # tool_positive_z... 必须匹配ABB中实际TCP的+Z；当前false表示枪体->焊丝/TCP。
+      # tool_x_points... 当前false表示工具+X沿工件-X；正负方向错误时只切换此布尔值。
 
       # ==================== 分类点位置额外偏移 ====================
-      # 单位 mm，沿算法工件坐标 XYZ 施加：+X=焊接路径，+Y=朝 L 侧，+Z=向上。
-      # 仅取消某一行的注释，就只覆盖该轴；其他轴仍用 SDK 默认值。
+      # 单位mm，沿算法工件坐标施加：+X=焊接路径，+Y=朝L侧，+Z=离开底板向上。
+      # 偏置在手眼变换前施加；它不是相机XYZ或robot_base XYZ。
+      # rounded_features 的圆角/直线“偏移前”来自真实红点；配置非零偏置后，
+      # 最终CSV/机器人目标有意不再与原始测量点重合，这是工艺补偿而不是识别误差。
+      # 仅取消某一行注释就覆盖该轴；其余轴继续使用SDK默认值。
+      # 安全过渡点先继承相邻焊点所属类别偏置，再叠加 start/end_transition 微调，
+      # 从而默认保持安全点与相邻焊点在工件X方向对齐。
       # - "offset.start_transition.x=0.0"
       # - "offset.start_transition.y=0.0"
       # - "offset.start_transition.z=0.0"
