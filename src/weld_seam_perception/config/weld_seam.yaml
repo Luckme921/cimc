@@ -110,6 +110,15 @@ weld_seam_node:
       # - "primary.plane_search_leaf_size=1.0"
       # - "primary.plane_search_min_inliers=300"
       # - "primary.side_origin_low_quantile=0.002"
+      # 以下五项决定“哪些点先被染成红色焊缝候选”。z_abs_max 是距蓝色
+      # 底面的绝对高度带；normal_dot_max 排除近似底面的水平点；cluster_* 清除
+      # 小孤立簇。默认值保持现场旧行为，先查看终端打印的各聚类点数再调，不能
+      # 为了连接空洞而盲目增大 tolerance，否则焊瘤/邻近结构可能粘到主焊缝。
+      # - "primary.seam_z_abs_max=6.0"
+      # - "primary.seam_bottom_normal_dot_max=0.6"
+      # - "primary.seam_cluster_tolerance=3.5"
+      # - "primary.seam_cluster_min_size=30"
+      # - "primary.seam_cluster_max_size=500000"
 
       # ==================== 波纹板特征点提取 ====================
       # 这些参数先提取稳定的红色焊缝和四类周期角点，三种 path.mode 都会复用
@@ -139,6 +148,14 @@ weld_seam_node:
       # - "feature.max_hole_bridge=70.0"
       # - "feature.max_corner_extrapolation=18.0"
       # - "feature.min_corner_angle_deg=10.0"
+      # 周期模型只允许预测 ROI 首末可能缺失的角，不能凭预测直接造焊点。
+      # max_profile_distance 要求预测角附近存在稳健实测轮廓；support_span 内
+      # 至少有 min_support_bins 个正确的可见侧直线分箱，才接受边界补角。
+      # 证据不足时不会补造该边界角，轨迹只保留最近的完整确认角；若被忽略的
+      # 边界角也必须焊接，应放宽 ROI，而不是靠增大外推距离强行生成。
+      # - "feature.boundary_completion_max_profile_distance=8.0"
+      # - "feature.boundary_completion_support_span=15.0"
+      # - "feature.boundary_completion_min_support_bins=3"
       # duplicate_corner_merge_distance 同时作为相邻物理角最小安全间距，
       # 增大可合并近邻假角，但过大会错误合并两个真实角；不要只为补首末点盲目增大。
       # - "feature.duplicate_corner_merge_distance=18.0"
@@ -155,10 +172,11 @@ weld_seam_node:
       # false: 工件 local_y 较小一层是凸角；true: 较大一层是凸角。
       # - "feature.protruding_is_larger_local_y=false"
 
-      # ==================== 路径输出模式（SDK 2.4.0） ====================
+      # ==================== 路径输出模式（SDK 2.4.1） ====================
       # path.mode=feature_points：每个识别拐角1点 + 首末安全点（旧现场模式）。
-      # path.mode=rounded_features：复用旧四类姿态坐标系；完整圆角5个实测点，
-      # 每段真实直线1个实测中点；边界/缺测圆角只保留中心1个实测点。
+      # path.mode=rounded_features：复用已现场成功运行的四类姿态坐标系；
+      # 检测链首末角各1个实测点，只有内部完整圆角展开5个实测点，
+      # 相邻确认角之间增加1个实测直线中点；末角之后不向ROI边缘杂点延伸。
       # path.mode=adaptive_contour：沿红色焊缝轮廓自适应离散；直线稀、曲率处密。
       # 三种模式的输出 CSV/PoseArray/手眼/ABB 接口完全相同，只是点数和采样方式不同。
       #
@@ -180,6 +198,7 @@ weld_seam_node:
       # - "path.smoothing_half_window_bins=8"
       # - "path.outlier_max_distance=3.0"
       # 小空洞在相邻鲁棒轮廓点之间插值；大于该值直接报错，禁止跨未知区域焊接。
+      # rounded_features 只检查首末确认角之间；角外ROI边缘缺测不会再误伤轨迹。
       # - "path.max_bridge_gap=15.0"
       # 包含首末两个安全过渡点；ABB 当前硬上限为100。超限时整次提取失败，
       # SDK不会静默截断轨迹，也不会向ABB发送不完整路径。
@@ -191,17 +210,27 @@ weld_seam_node:
       # 以下四项只作用于 rounded_features：
       # point_count 必须是1~9内奇数。5表示中心点前后各2点；增至7可把总转角
       # 分到更多姿态点，但会增加ABB点数，且要求圆角两侧有更多完整实测支撑。
-      # spacing=2mm 是沿稳健轮廓弧长的目标间距；5点覆盖中心前后约4mm。
+      # 当前 spacing=3mm 是沿稳健轮廓弧长的目标间距；5点覆盖中心前后约6mm。
       # 最终坐标从红色实测点中选择，所以实际间距会随点云密度略有变化。
       # - "path.rounded_corner_point_count=5"
-      # - "path.rounded_corner_spacing=2.0"
+      - "path.rounded_corner_spacing=3.0"
       # measured_search_radius 是目标弧长附近寻找真实红点的最大范围；过小会使
       # 5点圆角回退成单点，过大可能跨到不应选择的邻近轮廓，默认6mm先不改。
       # - "path.rounded_measured_search_radius=6.0"
       # 去除相邻圆角覆盖范围后，剩余直线有效弧长小于此值就不增加中点。
-      # 一个完整四角周期通常是20个圆角点+4个直线中点+2个首末安全点=26点；
+      # 首末角为单点后，N个检测角的默认总点数约为：
+      # 2个安全点 + 2个首末单点 + (N-2)*5个内部圆角点 + (N-1)个直线中点。
       # ROI包含多个周期时按实际角点数增加，但总数仍受 max_points=100 约束。
       # - "path.rounded_min_straight_span=8.0"
+      # 默认至少检测到一整组4类角；少于4类通常说明 ROI、平面或角点识别不完整，
+      # 此时拒绝发布局部轨迹。只有明确需要焊接不足一周期时才谨慎调小。
+      # - "path.rounded_min_corner_count=4"
+      # true（推荐/默认）：检测链的第一和最后角各只输出中心1个实测点；只有
+      # 内部角才展开 point_count 个圆弧点。最后角之后不再向 ROI 杂点延伸中点。
+      # - "path.rounded_force_endpoint_single=true"
+      # true（推荐/默认）：内部角类别必须严格按四类周期逐个相邻，若跳过任一类
+      # 则整次提取失败，不向 ROS/ABB 发布“少一段直线”的危险轨迹。
+      # - "path.rounded_require_complete_topology=true"
 
       # ==================== 各类焊接点姿态（度） ====================
       # work_angle：焊枪中心轴与工件底板平面的夹角，必须在(0,90)度。
@@ -210,6 +239,8 @@ weld_seam_node:
       # rounded_features 的每组5点在角点两侧稳健直线姿态间分摊转角；它不会读取
       # adaptive_contour 的 max_orientation_step_deg。若单步姿态仍大，可先比较
       # point_count=7，再检查相邻类别 work/lead 是否人为设置差别过大。
+      # SDK 2.4.1 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
+      # 两侧内部圆角共用该斜率，避免点焊/空洞造成两次独立拟合姿态不一致。
       - "orientation.protruding_left.work_angle_deg=35.0"
       - "orientation.protruding_right.work_angle_deg=35.0"
       - "orientation.recessed_left.work_angle_deg=35.0"
@@ -244,6 +275,9 @@ weld_seam_node:
       # 偏置在手眼变换前施加；它不是相机XYZ或robot_base XYZ。
       # rounded_features 的圆角/直线“偏移前”来自真实红点；配置非零偏置后，
       # 最终CSV/机器人目标有意不再与原始测量点重合，这是工艺补偿而不是识别误差。
+      # 当前四类角启用了 -2/-5mm 的工件Z偏置；历史PLY回归显示它会把不少最终
+      # workpiece_z 推到检测底面以下。SDK 2.4.1 会打印 WARNING，并在CSV保留
+      # raw_workpiece_z 供对比。这里保留现场现值，不在没有实机确认时擅自归零。
       # 仅取消某一行注释就覆盖该轴；其余轴继续使用SDK默认值。
       # 安全过渡点先继承相邻焊点所属类别偏置，再叠加 start/end_transition 微调，
       # 从而默认保持安全点与相邻焊点在工件X方向对齐。

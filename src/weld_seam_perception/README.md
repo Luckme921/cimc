@@ -1,6 +1,6 @@
 # weld_seam_perception 包说明
 
-该包是焊缝 SDK 2.4.0 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。
+该包是焊缝 SDK 2.4.1 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。
 
 ## 文件作用
 
@@ -54,7 +54,7 @@ algorithm_overrides:
   - "orientation.tool_positive_z_points_from_tcp_to_body=false"
   - "orientation.tool_x_reference=workpiece_x"
   - "orientation.tool_x_points_along_positive_workpiece_x=false"
-  - "path.mode=feature_points"
+  - "path.mode=rounded_features"
 ```
 
 `tool_x_reference=workpiece_x` 时，算法保持 Tool Z 不变，并将工件焊接前进轴投影到 Tool Z 的法平面作为 Tool X，以减少局部角点造成的绕枪轴滚转。现场 TCP +X 与焊接前进方向相反时，只需把 `tool_x_points_along_positive_workpiece_x` 改为 `false`；需要复现 SDK 2.2.0 行为时可将参考模式改为 `corner_bisector`。
@@ -72,17 +72,17 @@ ROI、四类位置偏置、四类姿态等均可继续添加，不用重新编�
 路径模式只需在同一个 YAML 中切换，launch 不覆盖该参数：
 
 ```yaml
-# 现场已验证的四类拐点模式（默认）
+# 旧版四类单拐点模式（SDK通用默认，当前ROS YAML未启用）
 - "path.mode=feature_points"
 
-# 稀疏圆角模式：旧四类姿态坐标系，圆角5个实测点、直线段1个实测中点
+# 稀疏圆角模式：现场姿态坐标系，首末单点、内部圆角5点、确认角之间1个中点
 - "path.mode=rounded_features"
 
 # 曲率轮廓备用模式；ROS话题、CSV列、手眼和ABB协议均不变
 - "path.mode=adaptive_contour"
 ```
 
-三行只能启用一行。`rounded_features` 默认每个完整圆角 5 点、目标弧长间距 2 mm、每段有效直线 1 个中点；边界或点云缺测不足以支撑 5 点时只保留中心实测点。三种模式都计入首末安全点并受 100 点硬上限保护；`handeye_abb_bridge_node` 发送前还会再次拒绝超过 100 点的 PoseArray。ROS 仍按列名读取 `x,y,z,qw,qx,qy,qz`，手眼和 ABB 协议不变。
+三行只能启用一行。当前 YAML 使用 `rounded_features`，并把圆角目标弧长间距显式设为 3 mm；检测链首末角只保留中心实测点，内部完整圆角默认 5 点，相邻确认角之间最多增加 1 个实测中点。内部四类拓扑一旦跳类，SDK 会拒绝本次结果，不会把缺段轨迹发给手眼或 ABB。三种模式都计入首末安全点并受 100 点硬上限保护；`handeye_abb_bridge_node` 发送前还会再次拒绝超过 100 点的 PoseArray。ROS 仍按列名读取 `x,y,z,qw,qx,qy,qz`，新增 `raw_*` 诊断列不会改变 PoseArray、手眼和 ABB 协议。
 
 ## 构建
 

@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>weld_seam_perception</name>
-  <version>0.2.0</version>
-  <description>In-process ROS 2 adapter for weld_seam_sdk 2.4.</description>
+  <version>0.2.1</version>
+  <description>In-process ROS 2 adapter for weld_seam_sdk 2.4.1.</description>
   <maintainer email="luckme@todo.todo">luckme</maintainer>
   <license>Proprietary</license>
 
