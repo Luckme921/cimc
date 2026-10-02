@@ -71,7 +71,8 @@ weld_seam_node:
       # 当前 false 表示工具 +X 指向工件 -X；如需反转，只在 false/true 之间切换。
       - "orientation.tool_x_reference=workpiece_x"
       - "orientation.tool_x_points_along_positive_workpiece_x=false"
-      # 当前启用 rounded_features：圆角5个实测点 + 每段直线1个实测中点。
+      # 当前启用 rounded_features：完整内圆角5点 + 每段直线1个中点；
+      # 可靠实测优先，小空洞补点会在CSV中明确标记，不能当成真实点。
       # 改为 feature_points 可回到旧四类单拐点模式；改为 adaptive_contour
       # 可使用连续轮廓自适应采样。只修改等号右侧，不要同时写多条 path.mode。
       - "path.mode=rounded_features"
@@ -79,11 +80,14 @@ weld_seam_node:
       # ==================== ROI（相机/PLY 坐标系，mm） ====================
       # ROI 是相机/PLY坐标系下的轴对齐长方体，不是工件局部坐标系或 robot_base。
       # roi.enable=true 时六个边界参与过滤；-inf/inf 表示该方向不裁剪。
-      # 当前 X/Y/Z 均不裁剪；以下 X 值是用户当前配置，不由算法隐式覆盖。
+      # 当前 X 恢复现场验证过的 [-180,190] mm，Y/Z 不裁剪。此前设为
+      # [-inf,inf] 会把视野外缘多余红缝计入首末覆盖，导致已知点云被拒绝。
+      # 该范围只适用于相同拍照位置；live_20260924_091242_789 离线文件
+      # 需用全 X 才能保留完整角链，不能靠改大首末外推阈值强行通过。
       # 收紧 ROI 可去掉背景并稳定周期识别，但必须同时保留：蓝色底面、L侧面和
       # 需要焊接的完整红色轮廓。切掉角点两侧支撑会使5点圆角退化为单点。
-      - "roi.min_x=-inf"
-      - "roi.max_x=inf"
+      - "roi.min_x=-180"
+      - "roi.max_x=190"
       - "roi.min_y=-inf"
       - "roi.max_y=inf"
       - "roi.min_z=-inf"
@@ -174,7 +178,7 @@ weld_seam_node:
       # false: 工件 local_y 较小一层是凸角；true: 较大一层是凸角。
       # - "feature.protruding_is_larger_local_y=false"
 
-      # ==================== 路径输出模式（SDK 2.4.2） ====================
+      # ==================== 路径输出模式（SDK 2.4.4） ====================
       # path.mode=feature_points：每个识别拐角1点 + 首末安全点（旧现场模式）。
       # path.mode=rounded_features：复用已现场成功运行的四类姿态坐标系；
       # 检测链首末角各1个实测点，只有内部完整圆角展开5个实测点，
@@ -252,7 +256,7 @@ weld_seam_node:
       # rounded_features 的每组5点在角点两侧稳健直线姿态间分摊转角；它不会读取
       # adaptive_contour 的 max_orientation_step_deg。若单步姿态仍大，可先比较
       # point_count=7，再检查相邻类别 work/lead 是否人为设置差别过大。
-      # SDK 2.4.2 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
+      # SDK 2.4.4 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
       # 两侧内部圆角共用该斜率，避免点焊/空洞造成两次独立拟合姿态不一致。
       - "orientation.protruding_left.work_angle_deg=35.0"
       - "orientation.protruding_right.work_angle_deg=35.0"
@@ -289,7 +293,7 @@ weld_seam_node:
       # rounded_features 的圆角/直线“偏移前”来自真实红点；配置非零偏置后，
       # 最终CSV/机器人目标有意不再与原始测量点重合，这是工艺补偿而不是识别误差。
       # 当前四类角启用了 -2/-5mm 的工件Z偏置；历史PLY回归显示它会把不少最终
-      # workpiece_z 推到检测底面以下。SDK 2.4.2 会打印 WARNING，并在CSV保留
+      # workpiece_z 推到检测底面以下。SDK 2.4.4 会打印 WARNING，并在CSV保留
       # raw_workpiece_z 供对比。这里保留现场现值，不在没有实机确认时擅自归零。
       # 仅取消某一行注释就覆盖该轴；其余轴继续使用SDK默认值。
       # 安全过渡点先继承相邻焊点所属类别偏置，再叠加 start/end_transition 微调，

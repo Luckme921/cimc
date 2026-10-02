@@ -8,17 +8,18 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+import numpy as np
 import yaml
 
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 CASES = (
-    ("capture_1790216105559", False),
+    ("capture_1790216105559", True),
     ("live_20260924_095031_427", True),
-    ("live_20260924_091242_789", True),
+    ("live_20260924_091242_789", False),
     ("live_20260924_085227_114", False),
-    ("20260616测试视野1", False),
-    ("20260616测试视野-2", False),
+    ("20260616测试视野1", True),
+    ("20260616测试视野-2", True),
 )
 
 
@@ -71,7 +72,7 @@ def main():
                     rows = list(csv.DictReader(stream))
                 # 6 physical corners = 2 safe + 2 endpoint singles +
                 # 4*5 internal samples + 5 straight midpoints = 29.
-                if len(rows) < 29 or len(rows) > 100:
+                if len(rows) != 29 or len(rows) > 100:
                     failures.append(f"{name}: unsafe partial/oversized path ({len(rows)} points)")
                 for row in rows:
                     if row["weld_enabled"] == "1" and \
@@ -89,9 +90,64 @@ def main():
                             float(previous["raw_workpiece_x"]) <= 0.25:
                         failures.append(f"{name}: non-monotonic raw target order")
                         break
+                rounded_groups = []
+                current_group = []
+                for row in rows:
+                    if row["feature_type"].endswith("_rounded_corner_sample"):
+                        current_group.append(row)
+                    elif current_group:
+                        rounded_groups.append(current_group)
+                        current_group = []
+                if current_group:
+                    rounded_groups.append(current_group)
+                if sum(len(group) == 5 for group in rounded_groups) != 4:
+                    failures.append(f"{name}: an internal five-point corner is missing")
+                for group in rounded_groups:
+                    if len(group) != 5:
+                        if group[0]["point_source"] != "measured_red_seam_point":
+                            failures.append(f"{name}: endpoint corner is not measured")
+                        continue
+                    if sum(row["point_source"] ==
+                           "modeled_small_hole_from_adjacent_lines"
+                           for row in group) > 3:
+                        failures.append(f"{name}: corner relies on too many modeled points")
+                    direction = 1 if float(group[-1]["raw_workpiece_y"]) >= \
+                        float(group[0]["raw_workpiece_y"]) else -1
+                    for previous, current in zip(group, group[1:]):
+                        if direction * (float(current["raw_workpiece_y"]) -
+                                        float(previous["raw_workpiece_y"])) < -0.1:
+                            failures.append(f"{name}: a rounded corner reverses Y")
+                            break
+                    # The existing tool-frame convention should keep the five
+                    # torch-axis lines roughly concurrent at a rounded corner.
+                    matrix = np.zeros((3, 3))
+                    vector = np.zeros(3)
+                    axes = []
+                    positions = []
+                    for row in group:
+                        axis = np.array([float(row[key]) for key in (
+                            "world_torch_body_axis_x", "world_torch_body_axis_y",
+                            "world_torch_body_axis_z")])
+                        axis /= np.linalg.norm(axis)
+                        position = np.array([float(row[key]) for key in (
+                            "raw_x", "raw_y", "raw_z")])
+                        projector = np.eye(3) - np.outer(axis, axis)
+                        matrix += projector
+                        vector += projector @ position
+                        axes.append(axis)
+                        positions.append(position)
+                    center = np.linalg.solve(matrix, vector)
+                    maximum_axis_miss = max(np.linalg.norm(
+                        np.cross(center - position, axis))
+                        for position, axis in zip(positions, axes))
+                    if maximum_axis_miss > 2.5:
+                        failures.append(f"{name}: corner tool axes miss their "
+                                        f"common center by {maximum_axis_miss:.2f} mm")
                 maximum_turn = max(
                     float(row["orientation_delta_from_previous_deg"])
                     for row in rows)
+                if maximum_turn > 30.0:
+                    failures.append(f"{name}: adjacent tool turn {maximum_turn:.2f} deg")
                 weld_rows = [row for row in rows if row["weld_enabled"] == "1"]
                 min_raw_z = min(float(row["raw_workpiece_z"]) for row in weld_rows)
                 min_target_z = min(float(row["workpiece_z"]) for row in weld_rows)
@@ -121,6 +177,23 @@ def main():
                     (output_dir / (visual_prefix + "_features.csv")).exists() or \
                     (output_dir / (visual_prefix + "_feature_points.ply")).exists():
                 failures.append(f"{name}: visualization-only isolation failed")
+
+        # The two files were captured/cropped under different ROI choices.
+        # Do not relax the production boundary guard just to pass one global ROI.
+        for name in ("live_20260924_091242_789", "live_20260924_095031_427"):
+            input_ply = args.data_root / (name + ".ply")
+            prefix = name + "_full_x"
+            command = [str(args.extractor), str(input_ply), str(output_dir), prefix]
+            for override in overrides + ["roi.min_x=-inf", "roi.max_x=inf"]:
+                command.extend(("--set", override))
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            csv_path = output_dir / (prefix + "_features.csv")
+            if result.returncode != 0 or not csv_path.is_file():
+                failures.append(f"{name}: full-X ROI should yield a complete path")
+                continue
+            with csv_path.open(newline="", encoding="utf-8") as stream:
+                if len(list(csv.DictReader(stream))) != 29:
+                    failures.append(f"{name}: full-X ROI path has wrong point count")
     if failures:
         raise SystemExit("\n".join(failures))
     print("Offline rounded field regression passed; no hardware was commanded.")

@@ -2490,9 +2490,15 @@ static int selectMeasuredPathPoint(
     const FeatureExtractionParams& params,
     const std::vector<Eigen::Vector3f>& used_locals,
     float minimum_separation,
-    bool prefer_xy = false)
+    bool prefer_xy = false,
+    float max_local_x = std::numeric_limits<float>::infinity(),
+    float min_local_y = -std::numeric_limits<float>::infinity(),
+    float max_local_y = std::numeric_limits<float>::infinity())
 {
     const auto is_separated = [&](const SeamProfileSample& sample) {
+        if (sample.local_x > max_local_x) return false;
+        if (sample.local_y < min_local_y || sample.local_y > max_local_y)
+            return false;
         for (size_t i = 0; i < used_locals.size(); ++i) {
             const Eigen::Vector2f delta =
                 Eigen::Vector2f(sample.local_x, sample.local_y) -
@@ -2561,6 +2567,8 @@ static bool selectRoundedCornerPoint(
     const FeatureExtractionParams& feature_params,
     const AdaptiveContourParams& path_params,
     bool allow_model,
+    float max_measured_local_x,
+    bool enforce_y_monotonic,
     const std::vector<Eigen::Vector3f>& used_locals,
     float minimum_separation,
     const Eigen::Vector3f& n_bottom,
@@ -2626,11 +2634,24 @@ static bool selectRoundedCornerPoint(
             ideal_local.y() < min_y || ideal_local.y() > max_y) return false;
     }
 
+    float min_measured_local_y = -std::numeric_limits<float>::infinity();
+    float max_measured_local_y = std::numeric_limits<float>::infinity();
+    if (enforce_y_monotonic && !used_locals.empty()) {
+        const float dominant_slope =
+            std::abs(corner.left_line_slope) > std::abs(corner.right_line_slope)
+            ? corner.left_line_slope : corner.right_line_slope;
+        if (dominant_slope > 0.0f) {
+            min_measured_local_y = used_locals.back().y();
+        } else if (dominant_slope < 0.0f) {
+            max_measured_local_y = used_locals.back().y();
+        }
+    }
     const int measured_index = selectMeasuredPathPoint(
         samples, ideal_local.x(), ideal_local.y(),
         std::min(path_params.rounded_measured_search_radius,
             path_params.rounded_max_measured_snap_distance), feature_params,
-        used_locals, minimum_separation, true);
+        used_locals, minimum_separation, true, max_measured_local_x,
+        min_measured_local_y, max_measured_local_y);
     if (measured_index >= 0) {
         const SeamProfileSample& sample =
             samples[static_cast<size_t>(measured_index)];
@@ -2648,6 +2669,8 @@ static bool selectRoundedCornerPoint(
         }
     }
     if (!bounded_gap) return false;
+    if (ideal_local.y() < min_measured_local_y ||
+        ideal_local.y() > max_measured_local_y) return false;
     if (!used_locals.empty()) {
         const Eigen::Vector2f delta =
             ideal_local.head<2>() - used_locals.back().head<2>();
@@ -2951,12 +2974,21 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
                                               float minimum_separation) {
             const float target_arc = center_arc +
                 static_cast<float>(offset_index) * path_params.rounded_corner_spacing;
+            float max_measured_local_x = std::numeric_limits<float>::infinity();
+            if (offset_index < last_offset) {
+                float next_slope = 0.0f;
+                const Eigen::Vector3f next_target = interpolateAdaptiveLocal(
+                    profile, target_arc + path_params.rounded_corner_spacing,
+                    feature_params.local_fit_radius, next_slope);
+                max_measured_local_x = next_target.x() - 0.25f;
+            }
             WeldFeaturePoint feature = corners[corner_index];
             bool modeled_gap = false;
             if (!selectRoundedCornerPoint(
                     profile, samples, corners[corner_index], target_arc,
                     feature_params, path_params,
                     corner_index > 0 && corner_index + 1 < corners.size(),
+                    max_measured_local_x, offset_index > first_offset,
                     used_measured_locals,
                     minimum_separation,
                     n_bottom, d_bottom, n_side, d_side, n_tangent,
@@ -3063,7 +3095,9 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
             bool modeled_gap = false;
             if (!selectRoundedCornerPoint(
                     profile, samples, midpoint_reference, target_arc,
-                    feature_params, path_params, true, used_measured_locals,
+                    feature_params, path_params, true,
+                    std::numeric_limits<float>::infinity(), false,
+                    used_measured_locals,
                     0.50f * path_params.rounded_corner_spacing,
                     n_bottom, d_bottom, n_side, d_side, n_tangent,
                     feature.local, feature.world, feature.ideal_local,
@@ -3154,6 +3188,12 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
         feature_params.safe_transition_offset_z,
         n_bottom, d_bottom, n_side, d_side, n_tangent));
 
+    const size_t modeled_gap_points = static_cast<size_t>(std::count_if(
+        weld_points.begin(), weld_points.end(),
+        [](const WeldFeaturePoint& point) {
+            return point.is_modeled_gap_sample;
+        }));
+
     std::cout << "Rounded feature path: red_points=" << samples.size()
         << ", full_profile_bins=" << full_profile_bin_count
         << ", weld_bound_bins=" << bins.size()
@@ -3163,7 +3203,8 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
         << ", straight_midpoints=" << straight_midpoint_count
         << ", corner_spacing=" << path_params.rounded_corner_spacing << " mm"
         << ", largest_gap=" << largest_gap << " mm"
-        << ", measured_weld_points=" << weld_points.size()
+        << ", measured_weld_points=" << weld_points.size() - modeled_gap_points
+        << ", modeled_gap_points=" << modeled_gap_points
         << ", total_path_points=" << result.size() << std::endl;
     return result;
 }
@@ -5672,10 +5713,17 @@ static int executeWeldSeamExtraction(
             << contour_sample_count << " (path.max_points="
             << adaptive_params.max_points << ", including transitions)" << std::endl;
     } else if (adaptive_params.mode == "rounded_features") {
+        const size_t modeled_count = static_cast<size_t>(std::count_if(
+            feature_points.begin(), feature_points.end(),
+            [](const WeldFeaturePoint& point) {
+                return point.is_modeled_gap_sample;
+            }));
         std::cout << "Rounded feature weld points: corner_samples="
             << rounded_corner_sample_count
             << ", straight_midpoints=" << straight_midpoint_count
-            << " (all are measured red seam points before configured offsets)"
+            << ", measured_red_seam_points="
+            << rounded_corner_sample_count + straight_midpoint_count - modeled_count
+            << ", modeled_gap_points=" << modeled_count
             << std::endl;
     } else {
         std::cout << "Four-type weld feature points: "
@@ -5746,7 +5794,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.3";
+    return "2.4.4";
 }
 
 std::string weld_seam_sdk::commandLineHelp()

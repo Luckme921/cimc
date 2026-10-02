@@ -1,4 +1,4 @@
-# x86 焊缝提取算法与 SDK 2.4.3
+# x86 焊缝提取算法与 SDK 2.4.4
 
 本目录是 Ubuntu 22.04 x86_64 上的独立算法工程。它同时生成：
 
@@ -6,7 +6,7 @@
 - `libweld_seam_sdk.so`：供 ROS 2 节点或其他 C++ 程序进程内调用的共享库；
 - 可安装的头文件和 CMake package，外部工程可使用 `find_package(weld_seam_sdk)`。
 
-2.4.3 保留四类工具姿态和工件偏置，修复五点圆角在空洞旁被挤到短平边的问题：圆角中心由相邻直线的可见支撑定位，优先选距稳健轮廓不超过 `path.rounded_max_measured_snap_distance` 的实测红点；仅在两侧支撑充分、空洞宽度受 `path.max_bridge_gap` 限制时才用连续切向模型补点。CSV 的 `point_source=modeled_small_hole_from_adjacent_lines` 和结果 PLY 的亮绿色十字星明确标记非实测点；点序回退/过近会整条拒绝。2.4.2 的首末边界保护仍保留；`path.rounded_visualization_only=true` 只写诊断 PLY、返回失败、不写可发送 ABB 的 CSV。
+2.4.4 延续 2.4.3 的四类工具姿态、工件偏置和首末边界保护，并修正五点圆角的贪心取点：前一个实测点不能占据下一个目标的 X 区域，同组目标沿期望 Y 方向不回退。可靠红点优先，只有两侧支撑充分且宽度受 `path.max_bridge_gap` 限制的小空洞才用连续切向模型补点。CSV 的 `point_source=modeled_small_hole_from_adjacent_lines` 和结果 PLY 的亮绿色十字星明确标记非实测点；点序回退/过近会整条拒绝。`path.rounded_visualization_only=true` 只写诊断 PLY、返回失败、不写可发送 ABB 的 CSV。
 
 2.4.2 收紧了 `rounded_features` 的首末安全边界：如果首末已确认角之外还有超过 `feature.max_corner_extrapolation` 的红色焊缝，则拒绝发布可能漏焊的部分轨迹。CSV 同时保存偏置前 `raw_*` 和最终机器人目标，便于区分识别误差与工艺偏置。
 
