@@ -79,11 +79,11 @@ weld_seam_node:
       # ==================== ROI（相机/PLY 坐标系，mm） ====================
       # ROI 是相机/PLY坐标系下的轴对齐长方体，不是工件局部坐标系或 robot_base。
       # roi.enable=true 时六个边界参与过滤；-inf/inf 表示该方向不裁剪。
-      # 当前 X=[-180,190] mm，Y/Z 不裁剪；这两项 X 值是已有现场配置，不在本次改动中调整。
+      # 当前 X/Y/Z 均不裁剪；以下 X 值是用户当前配置，不由算法隐式覆盖。
       # 收紧 ROI 可去掉背景并稳定周期识别，但必须同时保留：蓝色底面、L侧面和
       # 需要焊接的完整红色轮廓。切掉角点两侧支撑会使5点圆角退化为单点。
-      - "roi.min_x=-180"
-      - "roi.max_x=190"
+      - "roi.min_x=-inf"
+      - "roi.max_x=inf"
       - "roi.min_y=-inf"
       - "roi.max_y=inf"
       - "roi.min_z=-inf"
@@ -219,6 +219,13 @@ weld_seam_node:
       # measured_search_radius 是目标弧长附近寻找真实红点的最大范围；过小会使
       # 5点圆角回退成单点，过大可能跨到不应选择的邻近轮廓，默认6mm先不改。
       # - "path.rounded_measured_search_radius=6.0"
+      # 实测点偏离稳健轮廓超过 2.5mm 时不能把它强行吸附为圆角目标。
+      # 明确存在 2~15mm 小空洞且两侧直线有支撑时，可用切向连续的拟合点；
+      # CSV 的 point_source 会标记 modeled_small_hole_from_adjacent_lines，
+      # 拟合点不是原始实测点，实机使用前必须逐点检查可视化结果。
+      # - "path.rounded_max_measured_snap_distance=2.5"
+      # - "path.rounded_min_gap_for_model=2.0"
+      # - "path.rounded_model_small_holes=true"
       # 去除相邻圆角覆盖范围后，剩余直线有效弧长小于此值就不增加中点。
       # 首末角为单点后，N个检测角的默认总点数约为：
       # 2个安全点 + 2个首末单点 + (N-2)*5个内部圆角点 + (N-1)个直线中点。
@@ -233,6 +240,10 @@ weld_seam_node:
       # true（推荐/默认）：内部角类别必须严格按四类周期逐个相邻，若跳过任一类
       # 则整次提取失败，不向 ROS/ABB 发布“少一段直线”的危险轨迹。
       # - "path.rounded_require_complete_topology=true"
+      # 仅限离线看图：true 时允许画出边界未确认的候选角点，但返回失败，
+      # 只生成 *_result.ply，不生成可发给 ABB 的 CSV/精确点 PLY。
+      # 现场 ROS/ABB 联调请保持 false（默认），绝不能把诊断图当执行轨迹。
+      # - "path.rounded_visualization_only=false"
 
       # ==================== 各类焊接点姿态（度） ====================
       # work_angle：焊枪中心轴与工件底板平面的夹角，必须在(0,90)度。

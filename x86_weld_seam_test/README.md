@@ -1,4 +1,4 @@
-# x86 焊缝提取算法与 SDK 2.4.2
+# x86 焊缝提取算法与 SDK 2.4.3
 
 本目录是 Ubuntu 22.04 x86_64 上的独立算法工程。它同时生成：
 
@@ -6,7 +6,9 @@
 - `libweld_seam_sdk.so`：供 ROS 2 节点或其他 C++ 程序进程内调用的共享库；
 - 可安装的头文件和 CMake package，外部工程可使用 `find_package(weld_seam_sdk)`。
 
-2.4.2 保留三种路径接口及既有工具姿态构造，收紧 `rounded_features` 的首末安全边界：只有周期预测且转角两侧均存在有效实测直线与足够分箱时才补角；如果首末已确认角之外还有超过 `feature.max_corner_extrapolation` 的红色焊缝，则拒绝发布这条可能漏焊的部分轨迹。内部完整圆角仍为 5 个实测点，首末角各 1 个实测点；不改变现有 ROI、工件偏置或四类姿态参数。CSV 同时保存偏置前 `raw_*` 和最终机器人目标，便于区分识别误差与工艺偏置。
+2.4.3 保留四类工具姿态和工件偏置，修复五点圆角在空洞旁被挤到短平边的问题：圆角中心由相邻直线的可见支撑定位，优先选距稳健轮廓不超过 `path.rounded_max_measured_snap_distance` 的实测红点；仅在两侧支撑充分、空洞宽度受 `path.max_bridge_gap` 限制时才用连续切向模型补点。CSV 的 `point_source=modeled_small_hole_from_adjacent_lines` 和结果 PLY 的亮绿色十字星明确标记非实测点；点序回退/过近会整条拒绝。2.4.2 的首末边界保护仍保留；`path.rounded_visualization_only=true` 只写诊断 PLY、返回失败、不写可发送 ABB 的 CSV。
+
+2.4.2 收紧了 `rounded_features` 的首末安全边界：如果首末已确认角之外还有超过 `feature.max_corner_extrapolation` 的红色焊缝，则拒绝发布可能漏焊的部分轨迹。CSV 同时保存偏置前 `raw_*` 和最终机器人目标，便于区分识别误差与工艺偏置。
 
 ## 1. 文件说明
 
@@ -161,10 +163,16 @@ cmake --build build -j"$(nproc)"
 
 # 推荐的稀疏圆角路径。N个确认角的默认点数为：
 # 2个安全点 + 2个首末单点 + (N-2)*5个内部圆角点 + (N-1)个角间中点。
-# 例如N=4时为17点。位置来自实测红点，姿态坐标系沿用 feature_points。
+# 例如N=4时为17点。位置优先来自实测红点；有支撑的小空洞补点会标明来源。
 ./build/weld_seam_extractor input.ply output rounded \
   --config config/default.conf \
   --set path.mode=rounded_features
+
+# 只看全范围 PLY 的候选结果：预期返回非零，只写 *_result.ply；
+# 无 CSV/精确点 PLY，绝不可把诊断结果发给 ABB。
+./build/weld_seam_extractor input.ply output inspect_only \
+  --set path.mode=rounded_features \
+  --set path.rounded_visualization_only=true
 ```
 
 只测试法向策略：
@@ -196,7 +204,7 @@ cmake --build build -j"$(nproc)"
 
 `adaptive_contour` 不要求四类拐点检测完整。其焊接行在 CSV 中标记为 `feature_type=adaptive_contour_point`、`point_source=robust_profile_adaptive_sampling`，姿态源为 `local_contour_tangent`。三种模式都在首尾增加安全过渡点；ROS 节点仍只读取统一的 `x,y,z,qw,qx,qy,qz`，因此手眼与 ABB 协议不变。
 
-`rounded_features` 先运行与 `feature_points` 相同的四类周期角点检测，再到红色焊缝原始点集合中选择位置。检测链首末角固定为中心单点，内部有双侧支持的完整圆角才展开多个点；直线中点只生成在两个已确认角之间，末角之后不再追随 ROI 边缘或点焊杂点。空洞检查同样只覆盖第一确认角到最后确认角的实际焊接区：区外 ROI 边缘缺测不再误伤轨迹，区内超过 `path.max_bridge_gap` 的未知段仍安全失败。内部类别必须逐项满足四类周期，发现跳类就整次失败，避免“少一个角仍向 ABB 发送、少走一条直线”。相邻两角之间的同一物理直线只做一次鲁棒拟合，并由直线中点及相邻圆角边界共同使用，避免空洞或焊瘤令两端独立拟合出不同姿态。CSV 的 `point_source=measured_red_seam_point` 表示偏置前位置来自输入点云；`raw_x/raw_y/raw_z` 和 `raw_workpiece_*` 保存偏置前坐标，原有 `x/y/z` 和 `workpiece_*` 保存施加工艺偏置后的最终目标。工具 X、工具 Z、四类 work/lead 角和正负方向仍保持现场成功版本的同一姿态函数。
+`rounded_features` 先运行与 `feature_points` 相同的四类周期角点检测，再到红色焊缝原始点集合中选择位置。检测链首末角固定为中心单点，内部有双侧支持的完整圆角才展开多个点；直线中点只生成在两个已确认角之间。小空洞仅在两侧直线和稳健轮廓支撑下拟合，不会把距离目标数毫米的错误实测点吸附进路径；拟合点在 CSV 与 PLY 明确标记。超过 `path.max_bridge_gap` 的未知段、内部四类跳类、点序回退或首末未覆盖均安全失败。相邻两角之间的同一物理直线只做一次鲁棒拟合，直线中点和相邻圆角边界共用该斜率以保持姿态连续。`raw_x/raw_y/raw_z` 和 `raw_workpiece_*` 保存偏置前坐标，原有 `x/y/z` 和 `workpiece_*` 保存工艺偏置后的最终目标。工具 X、工具 Z、四类 work/lead 角和正负方向仍保持现场成功版本的同一姿态函数。
 
 旧 `feature_points` 每个物理拐角只输出一个离散点，左右腰切换时相邻 CSV 四元数出现 30–45° 变化属于该模式的几何定义。优先使用 `rounded_features` 在保持旧工具坐标系的前提下把圆角转姿分摊到 5 个点；`adaptive_contour` 仍保留 20 mm 弧长姿态平滑与 6° 切线步长限制，适合需要更密连续轮廓的离线对照。
 

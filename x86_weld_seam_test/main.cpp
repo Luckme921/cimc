@@ -264,6 +264,11 @@ struct AdaptiveContourParams {
     int rounded_corner_point_count = 5;
     float rounded_corner_spacing = 2.0f;
     float rounded_measured_search_radius = 6.0f;
+    // 缺口处不能把远处红点当作圆角目标。仅当缺口两侧都有轮廓支撑、
+    // 且宽度不超过 max_bridge_gap 时，才允许由相邻直线切向构造补点。
+    float rounded_max_measured_snap_distance = 2.5f;
+    float rounded_min_gap_for_model = 2.0f;
+    bool rounded_model_small_holes = true;
     float rounded_min_straight_span = 8.0f;
     int rounded_min_corner_count = 4;
 
@@ -271,6 +276,9 @@ struct AdaptiveContourParams {
     // 边缘向未知区域展开圆弧。内部四类拓扑不得跳类，否则整条轨迹拒绝输出。
     bool rounded_force_endpoint_single = true;
     bool rounded_require_complete_topology = true;
+    // 仅供离线检查：允许画出首末证据不足的候选路径，但结果 status 非零、
+    // 不写 CSV/精确点文件，ROS/ABB 永远不能把它当作有效轨迹。
+    bool rounded_visualization_only = false;
 };
 
 enum TorchPoseGroup {
@@ -433,6 +441,8 @@ struct WeldFeaturePoint {
     int merged_detection_count;
     float left_line_slope;
     float right_line_slope;
+    float left_support_end_x = std::numeric_limits<float>::quiet_NaN();
+    float right_support_start_x = std::numeric_limits<float>::quiet_NaN();
     Eigen::Vector3f ideal_local;
     SeamSegmentType left_segment;
     SeamSegmentType right_segment;
@@ -442,6 +452,7 @@ struct WeldFeaturePoint {
     bool is_contour_sample = false;
     bool is_rounded_corner_sample = false;
     bool is_straight_midpoint = false;
+    bool is_modeled_gap_sample = false;
     int pose_group_override = -1;
 
     // applyFeaturePositionOffsets() 会保存偏置前的实际几何位置。最终 world/local
@@ -1845,6 +1856,8 @@ static std::vector<WeldFeaturePoint> extractOrderedWeldFeatures(
             feature.merged_detection_count = 1;
             feature.left_line_slope = left.line.slope;
             feature.right_line_slope = right.line.slope;
+            feature.left_support_end_x = left.x_last;
+            feature.right_support_start_x = right.x_first;
             feature.left_segment = left.type;
             feature.right_segment = right.type;
             feature.topology_state = topology_state;
@@ -2448,12 +2461,22 @@ static float nearestProfileArc(
 {
     float best_arc = profile.front().arc_length;
     float best_distance_squared = std::numeric_limits<float>::max();
-    for (size_t i = 0; i < profile.size(); ++i) {
+    // 投影到连续轮廓段，而不是只找最近的离散分箱。真实转角落在缺测段
+    // 中间时，最近分箱总在缺口一侧，会把整组五点挤到短平边上。
+    for (size_t i = 1; i < profile.size(); ++i) {
+        const Eigen::Vector2f start = profile[i - 1].local.head<2>();
+        const Eigen::Vector2f direction =
+            profile[i].local.head<2>() - start;
+        const float length_squared = direction.squaredNorm();
+        if (length_squared < 1e-8f) continue;
+        const float projection = std::max(0.0f, std::min(1.0f,
+            (local.head<2>() - start).dot(direction) / length_squared));
         const Eigen::Vector2f delta =
-            profile[i].local.head<2>() - local.head<2>();
+            start + projection * direction - local.head<2>();
         if (delta.squaredNorm() < best_distance_squared) {
             best_distance_squared = delta.squaredNorm();
-            best_arc = profile[i].arc_length;
+            best_arc = profile[i - 1].arc_length + projection *
+                (profile[i].arc_length - profile[i - 1].arc_length);
         }
     }
     return best_arc;
@@ -2466,7 +2489,8 @@ static int selectMeasuredPathPoint(
     float search_radius,
     const FeatureExtractionParams& params,
     const std::vector<Eigen::Vector3f>& used_locals,
-    float minimum_separation)
+    float minimum_separation,
+    bool prefer_xy = false)
 {
     const auto is_separated = [&](const SeamProfileSample& sample) {
         for (size_t i = 0; i < used_locals.size(); ++i) {
@@ -2518,7 +2542,9 @@ static int selectMeasuredPathPoint(
             z_delta > z_tolerance) {
             continue;
         }
-        const float score = z_delta + 0.02f * std::sqrt(distance_squared);
+        const float score = prefer_xy
+            ? std::sqrt(distance_squared) + 0.20f * z_delta
+            : z_delta + 0.02f * std::sqrt(distance_squared);
         if (score < best_score) {
             best_score = score;
             best_sample = static_cast<int>(i);
@@ -2527,34 +2553,113 @@ static int selectMeasuredPathPoint(
     return best_sample;
 }
 
-static bool selectMeasuredRoundedPoint(
+static bool selectRoundedCornerPoint(
     const std::vector<AdaptiveProfilePoint>& profile,
     const std::vector<SeamProfileSample>& samples,
+    const WeldFeaturePoint& corner,
     float arc,
-    float search_radius,
     const FeatureExtractionParams& feature_params,
+    const AdaptiveContourParams& path_params,
+    bool allow_model,
     const std::vector<Eigen::Vector3f>& used_locals,
     float minimum_separation,
-    Eigen::Vector3f& measured_local,
-    Eigen::Vector3f& measured_world,
+    const Eigen::Vector3f& n_bottom,
+    float d_bottom,
+    const Eigen::Vector3f& n_side,
+    float d_side,
+    const Eigen::Vector3f& n_tangent,
+    Eigen::Vector3f& local,
+    Eigen::Vector3f& world,
     Eigen::Vector3f& ideal_local,
-    float& local_slope,
-    float& distance_to_ideal)
+    float& distance_to_ideal,
+    bool& modeled_gap)
 {
+    float unused_slope = 0.0f;
     ideal_local = interpolateAdaptiveLocal(
-        profile, arc, feature_params.local_fit_radius, local_slope);
+        profile, arc, feature_params.local_fit_radius, unused_slope);
+    modeled_gap = false;
+
+    const auto upper = std::upper_bound(
+        profile.begin(), profile.end(), arc,
+        [](float value, const AdaptiveProfilePoint& point) {
+            return value < point.arc_length;
+        });
+    const size_t right = std::max<size_t>(
+        1, std::min(profile.size() - 1,
+            static_cast<size_t>(upper - profile.begin())));
+    const size_t left = right - 1;
+    const float gap_x = profile[right].local.x() - profile[left].local.x();
+    const bool valid_tangents =
+        std::isfinite(corner.left_line_slope) &&
+        std::isfinite(corner.right_line_slope) &&
+        std::abs(corner.left_line_slope) < 10.0f &&
+        std::abs(corner.right_line_slope) < 10.0f;
+    const bool bounded_gap = allow_model &&
+        path_params.rounded_model_small_holes && valid_tangents &&
+        gap_x >= path_params.rounded_min_gap_for_model &&
+        gap_x <= path_params.max_bridge_gap &&
+        corner.ideal_local.x() >= profile[left].local.x() -
+            path_params.rounded_corner_spacing &&
+        corner.ideal_local.x() <= profile[right].local.x() +
+            path_params.rounded_corner_spacing;
+    if (bounded_gap) {
+        const float span = profile[right].arc_length - profile[left].arc_length;
+        const float t = span > 1e-6f
+            ? std::max(0.0f, std::min(1.0f,
+                (arc - profile[left].arc_length) / span)) : 0.0f;
+        const float t2 = t * t;
+        const float t3 = t2 * t;
+        const float left_slope = corner.left_line_slope;
+        const float right_slope = corner.right_line_slope;
+        // 只在缺口内用两侧已确认直线的切向作 Hermite 圆滑过渡。
+        // 不把拟合坐标冒充实测点；端点仍严格落在两侧红色轮廓上。
+        ideal_local.y() =
+            (2.0f * t3 - 3.0f * t2 + 1.0f) * profile[left].local.y() +
+            (t3 - 2.0f * t2 + t) * gap_x * left_slope +
+            (-2.0f * t3 + 3.0f * t2) * profile[right].local.y() +
+            (t3 - t2) * gap_x * right_slope;
+        const float min_y = std::min(profile[left].local.y(),
+            profile[right].local.y()) - 2.0f;
+        const float max_y = std::max(profile[left].local.y(),
+            profile[right].local.y()) + 2.0f;
+        if (!std::isfinite(ideal_local.y()) ||
+            ideal_local.y() < min_y || ideal_local.y() > max_y) return false;
+    }
+
     const int measured_index = selectMeasuredPathPoint(
         samples, ideal_local.x(), ideal_local.y(),
-        search_radius, feature_params, used_locals, minimum_separation);
-    if (measured_index < 0) return false;
-
-    const SeamProfileSample& measured =
-        samples[static_cast<size_t>(measured_index)];
-    measured_local = Eigen::Vector3f(
-        measured.local_x, measured.local_y, measured.local_z);
-    measured_world = measured.world;
-    distance_to_ideal =
-        (measured_local.head<2>() - ideal_local.head<2>()).norm();
+        std::min(path_params.rounded_measured_search_radius,
+            path_params.rounded_max_measured_snap_distance), feature_params,
+        used_locals, minimum_separation, true);
+    if (measured_index >= 0) {
+        const SeamProfileSample& sample =
+            samples[static_cast<size_t>(measured_index)];
+        const Eigen::Vector2f delta =
+            Eigen::Vector2f(sample.local_x, sample.local_y) -
+            ideal_local.head<2>();
+        if (delta.norm() <= path_params.rounded_max_measured_snap_distance &&
+            (used_locals.empty() ||
+             sample.local_x > used_locals.back().x() + 0.25f)) {
+            local = Eigen::Vector3f(
+                sample.local_x, sample.local_y, sample.local_z);
+            world = sample.world;
+            distance_to_ideal = delta.norm();
+            return true;
+        }
+    }
+    if (!bounded_gap) return false;
+    if (!used_locals.empty()) {
+        const Eigen::Vector2f delta =
+            ideal_local.head<2>() - used_locals.back().head<2>();
+        if (delta.norm() < minimum_separation ||
+            ideal_local.x() <= used_locals.back().x() + 0.25f) return false;
+    }
+    local = ideal_local;
+    world = localToWorld(
+        local.x(), local.y(), local.z(),
+        n_bottom, d_bottom, n_side, d_side, n_tangent);
+    distance_to_ideal = 0.0f;
+    modeled_gap = true;
     return true;
 }
 
@@ -2650,7 +2755,8 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
         0.0f, bins.back().local_x - corners.back().ideal_local.x());
     if (path_params.rounded_require_complete_topology &&
         (uncovered_start > feature_params.max_corner_extrapolation ||
-         uncovered_end > feature_params.max_corner_extrapolation)) {
+         uncovered_end > feature_params.max_corner_extrapolation) &&
+        !path_params.rounded_visualization_only) {
         std::ostringstream stream;
         stream << "rounded features: red seam extends " << uncovered_start
                << " mm before first confirmed corner and " << uncovered_end
@@ -2661,6 +2767,14 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
                   "each required end corner";
         error = stream.str();
         return result;
+    }
+    if (path_params.rounded_visualization_only &&
+        (uncovered_start > feature_params.max_corner_extrapolation ||
+         uncovered_end > feature_params.max_corner_extrapolation)) {
+        std::cerr << "INSPECTION ONLY: endpoint coverage is unconfirmed; "
+            << "no trajectory CSV will be written (start_tail="
+            << uncovered_start << " mm, end_tail=" << uncovered_end
+            << " mm)." << std::endl;
     }
 
     // rounded_features 的实际焊接边界由第一/最后确认角决定。边界外只有
@@ -2718,7 +2832,27 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
     std::vector<float> corner_arcs;
     corner_arcs.reserve(corners.size());
     for (size_t i = 0; i < corners.size(); ++i) {
-        corner_arcs.push_back(nearestProfileArc(profile, corners[i].local));
+        // 两条直线交点可落在圆角外侧，尤其一侧有空洞时不能把它误作五点
+        // 圆弧中心。用两条已确认直线的可见支撑端之间的中点定位转折，
+        // 再投影到稳健轮廓；无有效支撑间隙时仍保留原理论交点定位。
+        Eigen::Vector3f anchor = corners[i].ideal_local;
+        const float support_gap = corners[i].right_support_start_x -
+            corners[i].left_support_end_x;
+        if (std::isfinite(support_gap) &&
+            support_gap >= path_params.rounded_min_gap_for_model &&
+            support_gap <= path_params.max_bridge_gap) {
+            anchor.x() = 0.5f * (corners[i].left_support_end_x +
+                corners[i].right_support_start_x);
+            const float dx = anchor.x() - corners[i].ideal_local.x();
+            anchor.y() = corners[i].ideal_local.y() + 0.5f * dx *
+                (corners[i].left_line_slope + corners[i].right_line_slope);
+        }
+        corner_arcs.push_back(nearestProfileArc(profile, anchor));
+        std::cout << "Rounded corner anchor[" << i << "]: ideal_x="
+            << corners[i].ideal_local.x() << ", safe_x="
+            << corners[i].local.x() << ", support_gap=" << support_gap
+            << ", anchor_x=" << anchor.x() << ", arc=" << corner_arcs.back()
+            << std::endl;
         if (i > 0 && corner_arcs[i] <= corner_arcs[i - 1] + 1e-3f) {
             error = "rounded features: detected corner order is not monotonic on measured profile";
             return result;
@@ -2818,22 +2952,24 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
             const float target_arc = center_arc +
                 static_cast<float>(offset_index) * path_params.rounded_corner_spacing;
             WeldFeaturePoint feature = corners[corner_index];
-            float measured_slope = 0.0f;
-            if (!selectMeasuredRoundedPoint(
-                    profile, samples, target_arc,
-                    path_params.rounded_measured_search_radius,
-                    feature_params,
+            bool modeled_gap = false;
+            if (!selectRoundedCornerPoint(
+                    profile, samples, corners[corner_index], target_arc,
+                    feature_params, path_params,
+                    corner_index > 0 && corner_index + 1 < corners.size(),
                     used_measured_locals,
                     minimum_separation,
+                    n_bottom, d_bottom, n_side, d_side, n_tangent,
                     feature.local, feature.world, feature.ideal_local,
-                    measured_slope, feature.distance_to_ideal)) {
+                    feature.distance_to_ideal, modeled_gap)) {
                 return false;
             }
             feature.is_transition_point = false;
             feature.is_start_transition = false;
-            feature.measured_on_arc = true;
+            feature.measured_on_arc = !modeled_gap;
             feature.is_contour_sample = false;
             feature.is_rounded_corner_sample = true;
+            feature.is_modeled_gap_sample = modeled_gap;
             feature.is_straight_midpoint = false;
             feature.pose_group_override = -1;
             feature.merged_detection_count = 1;
@@ -2876,18 +3012,30 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
              offset_index <= last_offset; ++offset_index) {
             if (!append_corner_sample(
                     offset_index, complete_corner,
-                    0.25f * path_params.rounded_corner_spacing)) {
+                    0.50f * path_params.rounded_corner_spacing)) {
                 sampled_complete_corner = false;
                 break;
             }
         }
         if (!sampled_complete_corner && complete_corner) {
-            // 圆角两侧几何范围足够，但实测红点过稀/有点焊空洞时，不插值造点；
-            // 回退为该圆角中心一个真实点，与 ROI 边界圆角的安全策略一致。
+            // 圆角五点证据不够时，回退为中心的一个可靠实测红点；
+            // 如果中心也无可靠实测证据，就拒绝整条轨迹。
             candidates.resize(candidate_count_before_corner);
             used_measured_locals.resize(used_count_before_corner);
             if (!append_corner_sample(0, false, 0.0f)) {
                 error = "rounded features: cannot select a real red seam point at corner center";
+                return std::vector<WeldFeaturePoint>();
+            }
+        }
+        if (sampled_complete_corner && complete_corner) {
+            int modeled_count = 0;
+            for (size_t i = candidate_count_before_corner;
+                 i < candidates.size(); ++i) {
+                if (candidates[i].feature.is_modeled_gap_sample) ++modeled_count;
+            }
+            if (modeled_count > path_params.rounded_corner_point_count - 2) {
+                error = "rounded features: too many modeled positions in one corner; "
+                    "at least two measured red seam points are required";
                 return std::vector<WeldFeaturePoint>();
             }
         }
@@ -2907,18 +3055,22 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
             WeldFeaturePoint feature = corners[corner_index];
             float measured_slope = shared_segment_slopes[corner_index];
             float profile_slope = measured_slope;
-            if (!selectMeasuredRoundedPoint(
-                    profile, samples, target_arc,
-                    path_params.rounded_measured_search_radius,
-                    feature_params,
-                    used_measured_locals,
-                    0.25f * path_params.rounded_corner_spacing,
+            WeldFeaturePoint midpoint_reference = feature;
+            midpoint_reference.ideal_local = interpolateAdaptiveLocal(
+                profile, target_arc, feature_params.local_fit_radius, profile_slope);
+            midpoint_reference.left_line_slope = measured_slope;
+            midpoint_reference.right_line_slope = measured_slope;
+            bool modeled_gap = false;
+            if (!selectRoundedCornerPoint(
+                    profile, samples, midpoint_reference, target_arc,
+                    feature_params, path_params, true, used_measured_locals,
+                    0.50f * path_params.rounded_corner_spacing,
+                    n_bottom, d_bottom, n_side, d_side, n_tangent,
                     feature.local, feature.world, feature.ideal_local,
-                    profile_slope, feature.distance_to_ideal)) {
-                std::cerr << "Rounded features: skipped one straight midpoint because "
-                             "no real red seam point is available near its center."
-                          << std::endl;
-                continue;
+                    feature.distance_to_ideal, modeled_gap)) {
+                error = "rounded features: cannot place the straight midpoint "
+                    "within the measured-snap limit or a supported small hole";
+                return std::vector<WeldFeaturePoint>();
             }
             SeamSegmentType segment = feature.right_segment;
             if (segment == SEGMENT_UNKNOWN) {
@@ -2930,10 +3082,11 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
                 : feature.local.y() <= depth_split;
             feature.is_transition_point = false;
             feature.is_start_transition = false;
-            feature.measured_on_arc = true;
+            feature.measured_on_arc = !modeled_gap;
             feature.is_contour_sample = false;
             feature.is_rounded_corner_sample = false;
             feature.is_straight_midpoint = true;
+            feature.is_modeled_gap_sample = modeled_gap;
             feature.pose_group_override = static_cast<int>(
                 straightPoseGroup(segment, feature.protruding));
             feature.left_line_slope = measured_slope;
@@ -2961,6 +3114,18 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
     if (candidates.empty()) {
         error = "rounded features: no measured target point was generated";
         return result;
+    }
+    for (size_t i = 1; i < candidates.size(); ++i) {
+        const Eigen::Vector3f delta =
+            candidates[i].feature.local - candidates[i - 1].feature.local;
+        if (delta.x() <= 0.25f || delta.norm() < 0.75f) {
+            std::ostringstream stream;
+            stream << "rounded features: target order reverses or two adjacent "
+                   << "targets nearly coincide at sample " << i
+                   << "; refusing an unsafe robot path";
+            error = stream.str();
+            return std::vector<WeldFeaturePoint>();
+        }
     }
     if (candidates.size() + 2 > static_cast<size_t>(path_params.max_points)) {
         std::ostringstream stream;
@@ -3587,10 +3752,20 @@ static bool validateAdaptiveContourParams(
         params.rounded_min_corner_count > params.max_points - 2) {
         return fail("path.rounded_min_corner_count must be within [1, max_points-2].");
     }
+    if (params.rounded_visualization_only && params.mode != "rounded_features") {
+        return fail("path.rounded_visualization_only requires path.mode=rounded_features.");
+    }
     if (!std::isfinite(params.rounded_corner_spacing) ||
         params.rounded_corner_spacing <= 0.0f ||
         !std::isfinite(params.rounded_measured_search_radius) ||
         params.rounded_measured_search_radius <= 0.0f ||
+        !std::isfinite(params.rounded_max_measured_snap_distance) ||
+        params.rounded_max_measured_snap_distance <= 0.0f ||
+        params.rounded_max_measured_snap_distance >
+            params.rounded_measured_search_radius ||
+        !std::isfinite(params.rounded_min_gap_for_model) ||
+        params.rounded_min_gap_for_model <= 0.0f ||
+        params.rounded_min_gap_for_model > params.max_bridge_gap ||
         !std::isfinite(params.rounded_min_straight_span) ||
         params.rounded_min_straight_span <= 0.0f) {
         return fail("rounded feature spacing/search/span parameters must be finite and > 0.");
@@ -3737,11 +3912,15 @@ static bool saveFeatureCsv(
         } else if (feature.is_rounded_corner_sample) {
             feature_type = std::string(torchPoseGroupName(pose.group)) +
                 "_rounded_corner_sample";
-            point_source = "measured_red_seam_point";
+            point_source = feature.is_modeled_gap_sample
+                ? "modeled_small_hole_from_adjacent_lines"
+                : "measured_red_seam_point";
         } else if (feature.is_straight_midpoint) {
             feature_type = std::string(torchPoseGroupName(pose.group)) +
                 "_midpoint";
-            point_source = "measured_red_seam_point";
+            point_source = feature.is_modeled_gap_sample
+                ? "modeled_small_hole_from_adjacent_lines"
+                : "measured_red_seam_point";
         } else {
             // 与四组姿态/位置偏置使用完全相同的物理分类名称，机械臂端无需
             // 再根据凹凸和腰线方向进行二次推断。
@@ -3860,7 +4039,8 @@ static void appendFeatureMarkers(
     const Eigen::Vector3f& n_tangent,
     float radius)
 {
-    // 三条正交直线组成放大的粉红色三维十字星。三线交点严格等于 CSV 坐标，
+    // 三条正交直线组成放大的三维十字星：实测/安全点为粉红，
+    // 小空洞拟合点为亮绿色，避免把非实测机器人目标误认为真实红点。
     // 不再使用会遮挡中心位置的实心点球。
     const Eigen::Vector3f axes[3] = {n_tangent, n_side, n_bottom};
     for (size_t i = 0; i < features.size(); ++i) {
@@ -3870,7 +4050,9 @@ static void appendFeatureMarkers(
         center.x = features[i].world.x();
         center.y = features[i].world.y();
         center.z = features[i].world.z();
-        center.r = 255; center.g = 20; center.b = 147;
+        center.r = features[i].is_modeled_gap_sample ? 0 : 255;
+        center.g = features[i].is_modeled_gap_sample ? 255 : 20;
+        center.b = features[i].is_modeled_gap_sample ? 0 : 147;
         cloud.points.push_back(center);
 
         for (int axis = 0; axis < 3; ++axis) {
@@ -3881,7 +4063,7 @@ static void appendFeatureMarkers(
                         static_cast<float>(sign) * offset * axes[axis];
                     PointOutT marker;
                     marker.x = world.x(); marker.y = world.y(); marker.z = world.z();
-                    marker.r = 255; marker.g = 20; marker.b = 147;
+                    marker.r = center.r; marker.g = center.g; marker.b = center.b;
                     cloud.points.push_back(marker);
                 }
             }
@@ -4445,10 +4627,14 @@ static int executeWeldSeamExtraction(
     APPLY_INT("path.rounded_corner_point_count", adaptive_params.rounded_corner_point_count);
     APPLY_FLOAT("path.rounded_corner_spacing", adaptive_params.rounded_corner_spacing);
     APPLY_FLOAT("path.rounded_measured_search_radius", adaptive_params.rounded_measured_search_radius);
+    APPLY_FLOAT("path.rounded_max_measured_snap_distance", adaptive_params.rounded_max_measured_snap_distance);
+    APPLY_FLOAT("path.rounded_min_gap_for_model", adaptive_params.rounded_min_gap_for_model);
+    APPLY_BOOL("path.rounded_model_small_holes", adaptive_params.rounded_model_small_holes);
     APPLY_FLOAT("path.rounded_min_straight_span", adaptive_params.rounded_min_straight_span);
     APPLY_INT("path.rounded_min_corner_count", adaptive_params.rounded_min_corner_count);
     APPLY_BOOL("path.rounded_force_endpoint_single", adaptive_params.rounded_force_endpoint_single);
     APPLY_BOOL("path.rounded_require_complete_topology", adaptive_params.rounded_require_complete_topology);
+    APPLY_BOOL("path.rounded_visualization_only", adaptive_params.rounded_visualization_only);
 
     APPLY_FLOAT("orientation.protruding_left.work_angle_deg", torch_params.protruding_left_work_angle_deg);
     APPLY_FLOAT("orientation.protruding_right.work_angle_deg", torch_params.protruding_right_work_angle_deg);
@@ -5308,23 +5494,25 @@ static int executeWeldSeamExtraction(
     run_result.visualization_ply_path =
         output_base.string() + "_result.ply";
 
-    // 机械臂使用的是真实、精确、已经按 local_x 连续排序的单点集合。
-    if (!saveFeatureCsv(
-            run_result.csv_path, feature_points, feature_poses,
-            path_torch_params, position_offsets, workpiece_x_origin_projection)) {
-        run_result.message = "Failed to write feature CSV: " + run_result.csv_path;
-        std::cerr << run_result.message << std::endl;
-        return -1;
-    }
-    pcl::PointCloud<PointOutT>::Ptr exact_feature_cloud =
-        makeExactFeatureCloud(feature_points);
-    if (!saveExactFeaturePly(
-            run_result.feature_points_ply_path, *exact_feature_cloud)) {
-        run_result.message =
-            "Failed to write exact feature PLY: " +
-            run_result.feature_points_ply_path;
-        std::cerr << run_result.message << std::endl;
-        return -1;
+    if (!adaptive_params.rounded_visualization_only) {
+        // 机械臂使用的是按 local_x 连续排序并通过边界验证的点集合。
+        if (!saveFeatureCsv(
+                run_result.csv_path, feature_points, feature_poses,
+                path_torch_params, position_offsets, workpiece_x_origin_projection)) {
+            run_result.message = "Failed to write feature CSV: " + run_result.csv_path;
+            std::cerr << run_result.message << std::endl;
+            return -1;
+        }
+        pcl::PointCloud<PointOutT>::Ptr exact_feature_cloud =
+            makeExactFeatureCloud(feature_points);
+        if (!saveExactFeaturePly(
+                run_result.feature_points_ply_path, *exact_feature_cloud)) {
+            run_result.message =
+                "Failed to write exact feature PLY: " +
+                run_result.feature_points_ply_path;
+            std::cerr << run_result.message << std::endl;
+            return -1;
+        }
     }
 
     // 直接在原来的彩色结果点云上叠加粉红色过渡点/拐点三维十字星，打开
@@ -5342,6 +5530,16 @@ static int executeWeldSeamExtraction(
             run_result.visualization_ply_path;
         std::cerr << run_result.message << std::endl;
         return -1;
+    }
+    if (adaptive_params.rounded_visualization_only) {
+        run_result.csv_path.clear();
+        run_result.feature_points_ply_path.clear();
+        run_result.path_point_count = 0;
+        run_result.message =
+            "INSPECTION ONLY: visualization PLY saved; trajectory rejected "
+            "and no CSV or exact target PLY was written.";
+        std::cerr << run_result.message << std::endl;
+        return -2;
     }
     const std::chrono::steady_clock::time_point total_end_time =
         std::chrono::steady_clock::now();
@@ -5391,10 +5589,14 @@ static int executeWeldSeamExtraction(
             source_name = "robust profile adaptive sampling";
         } else if (feature.is_rounded_corner_sample) {
             feature_name = "ROUNDED_CORNER_SAMPLE";
-            source_name = "measured red seam point; four-type corner pose";
+            source_name = feature.is_modeled_gap_sample
+                ? "modeled small hole from adjacent lines; four-type corner pose"
+                : "measured red seam point; four-type corner pose";
         } else if (feature.is_straight_midpoint) {
             feature_name = "STRAIGHT_MIDPOINT";
-            source_name = "measured red seam point; same tool-frame convention";
+            source_name = feature.is_modeled_gap_sample
+                ? "modeled small hole from adjacent lines; same tool-frame convention"
+                : "measured red seam point; same tool-frame convention";
         } else {
             feature_name = feature.protruding ? "PROTRUDING_CORNER" : "RECESSED_CORNER";
             if (feature.topology_inferred) {
@@ -5544,7 +5746,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.2";
+    return "2.4.3";
 }
 
 std::string weld_seam_sdk::commandLineHelp()

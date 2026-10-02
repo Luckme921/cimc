@@ -1,6 +1,6 @@
 # weld_seam_perception 包说明
 
-该包是焊缝 SDK 2.4.1 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。
+该包是焊缝 SDK 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。源码中的 2.4.3 目前是离线候选版；未安装并重新构建前，现场 ROS 节点仍使用已安装的旧 SDK，不能仅凭源码版本号判断实际运行版本。
 
 ## 文件作用
 
@@ -82,7 +82,7 @@ ROI、四类位置偏置、四类姿态等均可继续添加，不用重新编�
 - "path.mode=adaptive_contour"
 ```
 
-三行只能启用一行。当前 YAML 使用 `rounded_features`，并把圆角目标弧长间距显式设为 3 mm；检测链首末角只保留中心实测点，内部完整圆角默认 5 点，相邻确认角之间最多增加 1 个实测中点。内部四类拓扑一旦跳类，SDK 会拒绝本次结果，不会把缺段轨迹发给手眼或 ABB。三种模式都计入首末安全点并受 100 点硬上限保护；`handeye_abb_bridge_node` 发送前还会再次拒绝超过 100 点的 PoseArray。ROS 仍按列名读取 `x,y,z,qw,qx,qy,qz`，新增 `raw_*` 诊断列不会改变 PoseArray、手眼和 ABB 协议。
+三行只能启用一行。当前 YAML 使用 `rounded_features`，圆角目标弧长间距为 3 mm；首末角各 1 点，内部完整圆角默认 5 点，确认角之间增加 1 个中点。可靠实测点优先；小空洞拟合点以 CSV 的 `point_source=modeled_small_hole_from_adjacent_lines` 和结果 PLY 的亮绿色十字星标记，不能当作实测点。内部四类跳类、目标顺序回退、首末覆盖不足时仍拒绝向手眼或 ABB 发布。三种模式都受含安全点在内的 100 点上限保护；ROS 仍按列名读取 `x,y,z,qw,qx,qy,qz`，`raw_*` 和 `point_source` 诊断列不改变手眼或 ABB 协议。
 
 ## 构建
 
