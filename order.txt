@@ -699,7 +699,16 @@ cp /home/mini/scut_weld_data/weld_results/weld_seam_capture_1790215929417_result
 # 14.4 版本检查和历史回退位置
 # ------------------------------------------------------------
 readlink -f ~/scut_weld_sdk_install/lib/libweld_seam_sdk.so.2
-# 当前期望：libweld_seam_sdk.so.2.4.0
+# 当前期望：libweld_seam_sdk.so.2.4.2
+
+# 推荐先用当前ROS YAML对五组历史点云做纯离线安全回归，不连接硬件：
+cd ~/x86_ros2_ws
+python3 x86_weld_seam_test/tests/rounded_field_regression.py
+# 095031、两组20260616应输出29点；085227和091242当前缺乏首末实测转角，
+# 会明确拒绝输出，而不是发送少焊一段的部分轨迹。后续若能可靠识别完整转角，
+# 脚本也允许它们成功，但必须得到至少29个且不超过100个真实点。
+# 实机前请同时检查CSV的raw_workpiece_z和workpiece_z：现有四类角Z负偏置
+# 可能把目标压到拟合底面以下，是否保留要由现场低速/空走验证决定。
 
 # 历史2.2.1与本次修改前2.2.2源码快照：
 # ~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.1

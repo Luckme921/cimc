@@ -79,11 +79,11 @@ weld_seam_node:
       # ==================== ROI（相机/PLY 坐标系，mm） ====================
       # ROI 是相机/PLY坐标系下的轴对齐长方体，不是工件局部坐标系或 robot_base。
       # roi.enable=true 时六个边界参与过滤；-inf/inf 表示该方向不裁剪。
-      # 当前虽然 enable=true，但六项均为无限，因此效果等同于保留完整点云。
+      # 当前 X=[-180,190] mm，Y/Z 不裁剪；这两项 X 值是已有现场配置，不在本次改动中调整。
       # 收紧 ROI 可去掉背景并稳定周期识别，但必须同时保留：蓝色底面、L侧面和
       # 需要焊接的完整红色轮廓。切掉角点两侧支撑会使5点圆角退化为单点。
-      - "roi.min_x=-inf"
-      - "roi.max_x=inf"
+      - "roi.min_x=-180"
+      - "roi.max_x=190"
       - "roi.min_y=-inf"
       - "roi.max_y=inf"
       - "roi.min_z=-inf"
@@ -131,7 +131,8 @@ weld_seam_node:
       # local_fit_*：角点两侧局部直线拟合窗口、半径和最大中位残差。
       # flat/waist_segment_max_length：周期拓扑允许的平段/腰段最大长度。
       # max_hole_bridge：角点检测允许连接的缺测区；过大会跨越真实未知区域。
-      # max_corner_extrapolation：只允许在红色轮廓边缘附近补全周期边界角。
+      # max_corner_extrapolation：边界补角的范围；rounded_features 也用它限制
+      # 首末已确认角以外的红缝长度。超限会报错且不发布轨迹，避免静默少焊一段。
       # min_corner_angle_deg：过小转角不认为是物理拐角。
       # - "feature.profile_bin_width=0.8"
       # - "feature.flat_normal_dot_min=0.80"
@@ -149,10 +150,11 @@ weld_seam_node:
       # - "feature.max_corner_extrapolation=18.0"
       # - "feature.min_corner_angle_deg=10.0"
       # 周期模型只允许预测 ROI 首末可能缺失的角，不能凭预测直接造焊点。
-      # max_profile_distance 要求预测角附近存在稳健实测轮廓；support_span 内
-      # 至少有 min_support_bins 个正确的可见侧直线分箱，才接受边界补角。
-      # 证据不足时不会补造该边界角，轨迹只保留最近的完整确认角；若被忽略的
-      # 边界角也必须焊接，应放宽 ROI，而不是靠增大外推距离强行生成。
+      # max_profile_distance 要求预测角附近有两条有效直线的实测转折；
+      # support_span 内转折两侧各至少有 min_support_bins 个正确线段分箱。
+      # 证据不足时不补造边界角；rounded_features 若还有明显未覆盖红缝，
+      # 会整次失败且不发机器人轨迹。应调整拍照/ROI保留角点两侧实测直线，
+      # 不要靠增大外推距离强行生成。
       # - "feature.boundary_completion_max_profile_distance=8.0"
       # - "feature.boundary_completion_support_span=15.0"
       # - "feature.boundary_completion_min_support_bins=3"
@@ -172,7 +174,7 @@ weld_seam_node:
       # false: 工件 local_y 较小一层是凸角；true: 较大一层是凸角。
       # - "feature.protruding_is_larger_local_y=false"
 
-      # ==================== 路径输出模式（SDK 2.4.1） ====================
+      # ==================== 路径输出模式（SDK 2.4.2） ====================
       # path.mode=feature_points：每个识别拐角1点 + 首末安全点（旧现场模式）。
       # path.mode=rounded_features：复用已现场成功运行的四类姿态坐标系；
       # 检测链首末角各1个实测点，只有内部完整圆角展开5个实测点，
@@ -239,7 +241,7 @@ weld_seam_node:
       # rounded_features 的每组5点在角点两侧稳健直线姿态间分摊转角；它不会读取
       # adaptive_contour 的 max_orientation_step_deg。若单步姿态仍大，可先比较
       # point_count=7，再检查相邻类别 work/lead 是否人为设置差别过大。
-      # SDK 2.4.1 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
+      # SDK 2.4.2 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
       # 两侧内部圆角共用该斜率，避免点焊/空洞造成两次独立拟合姿态不一致。
       - "orientation.protruding_left.work_angle_deg=35.0"
       - "orientation.protruding_right.work_angle_deg=35.0"
@@ -276,7 +278,7 @@ weld_seam_node:
       # rounded_features 的圆角/直线“偏移前”来自真实红点；配置非零偏置后，
       # 最终CSV/机器人目标有意不再与原始测量点重合，这是工艺补偿而不是识别误差。
       # 当前四类角启用了 -2/-5mm 的工件Z偏置；历史PLY回归显示它会把不少最终
-      # workpiece_z 推到检测底面以下。SDK 2.4.1 会打印 WARNING，并在CSV保留
+      # workpiece_z 推到检测底面以下。SDK 2.4.2 会打印 WARNING，并在CSV保留
       # raw_workpiece_z 供对比。这里保留现场现值，不在没有实机确认时擅自归零。
       # 仅取消某一行注释就覆盖该轴；其余轴继续使用SDK默认值。
       # 安全过渡点先继承相邻焊点所属类别偏置，再叠加 start/end_transition 微调，

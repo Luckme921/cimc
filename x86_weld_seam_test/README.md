@@ -1,4 +1,4 @@
-# x86 焊缝提取算法与 SDK 2.4.1
+# x86 焊缝提取算法与 SDK 2.4.2
 
 本目录是 Ubuntu 22.04 x86_64 上的独立算法工程。它同时生成：
 
@@ -6,7 +6,7 @@
 - `libweld_seam_sdk.so`：供 ROS 2 节点或其他 C++ 程序进程内调用的共享库；
 - 可安装的头文件和 CMake package，外部工程可使用 `find_package(weld_seam_sdk)`。
 
-2.4.1 保留三种路径接口和已经现场成功运行的工具姿态构造，重点加固 `rounded_features` 的 ROI 边界与缺角安全性：检测链首末角固定为单个实测点，只有内部完整圆角展开 5 个实测点；末角之后不再向 ROI 边缘杂点生成直线中点；内部四类角必须严格按周期相邻，动态规划会优先寻找逐类相邻的实测交点链，漏掉任何一类才拒绝发布轨迹。周期模型只能提出边界候选，候选附近还必须有红色稳健轮廓和正确可见线段的实测支持，不能凭理论周期制造焊点。CSV 同时保存偏置前 `raw_*` 和最终机器人目标，便于把识别误差与工艺偏置分开检查。
+2.4.2 保留三种路径接口及既有工具姿态构造，收紧 `rounded_features` 的首末安全边界：只有周期预测且转角两侧均存在有效实测直线与足够分箱时才补角；如果首末已确认角之外还有超过 `feature.max_corner_extrapolation` 的红色焊缝，则拒绝发布这条可能漏焊的部分轨迹。内部完整圆角仍为 5 个实测点，首末角各 1 个实测点；不改变现有 ROI、工件偏置或四类姿态参数。CSV 同时保存偏置前 `raw_*` 和最终机器人目标，便于区分识别误差与工艺偏置。
 
 ## 1. 文件说明
 
@@ -192,7 +192,7 @@ cmake --build build -j"$(nproc)"
 
 粉红色标记由多条线构成，但 CSV 输出坐标是十字中心，不是标记簇中任意一点。
 
-`feature_points` 只输出四类焊接拐点：`PROTRUDING_LEFT`、`PROTRUDING_RIGHT`、`RECESSED_LEFT`、`RECESSED_RIGHT`。一般的不完整视野边缘不会制造拐点；周期模型只负责提出首末边界候选，程序还会要求候选在 `boundary_completion_max_profile_distance` 内能吸附到真实稳健红色轮廓，并在 `boundary_completion_support_span` 内找到足够的正确可见线段分箱。证据不足就忽略候选，而不是扩大外推阈值强行补点。
+`feature_points` 只输出四类焊接拐点：`PROTRUDING_LEFT`、`PROTRUDING_RIGHT`、`RECESSED_LEFT`、`RECESSED_RIGHT`。一般的不完整视野边缘不会制造拐点；周期模型只负责提出首末边界候选。候选附近须存在与预期类型一致的两条有效实测直线，且转折两侧均有足够分箱支持；证据不足就忽略候选。`rounded_features` 还会拒绝首末明显未覆盖的部分轨迹，要求重新选取拍照视野/ROI。
 
 `adaptive_contour` 不要求四类拐点检测完整。其焊接行在 CSV 中标记为 `feature_type=adaptive_contour_point`、`point_source=robust_profile_adaptive_sampling`，姿态源为 `local_contour_tangent`。三种模式都在首尾增加安全过渡点；ROS 节点仍只读取统一的 `x,y,z,qw,qx,qy,qz`，因此手眼与 ABB 协议不变。
 

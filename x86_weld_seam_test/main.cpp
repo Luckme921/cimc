@@ -1251,57 +1251,119 @@ static float flatSlopeFromFeature(const WeldFeaturePoint& feature)
 struct BoundaryProfileSupport {
     SeamProfileBin point;
     int matching_segment_bins = 0;
+    int matching_exterior_bins = 0;
     float distance_to_prediction = std::numeric_limits<float>::infinity();
 };
 
 static bool findBoundaryProfileSupport(
     const std::vector<SeamProfileBin>& bins,
+    const std::vector<SeamLineRun>& runs,
     float predicted_x,
     float predicted_y,
     SeamSegmentType visible_segment,
+    SeamSegmentType exterior_segment,
     bool is_start_boundary,
+    bool require_two_sided_turn,
     const FeatureExtractionParams& params,
     BoundaryProfileSupport& support)
 {
-    if (bins.empty() || visible_segment == SEGMENT_UNKNOWN) return false;
+    if (bins.empty() || visible_segment == SEGMENT_UNKNOWN ||
+        (require_two_sided_turn &&
+         (exterior_segment == SEGMENT_UNKNOWN ||
+          exterior_segment == visible_segment))) return false;
 
     int nearest_index = -1;
     float nearest_distance_squared = std::numeric_limits<float>::max();
+    float turn_x = 0.0f;
     const float maximum_distance_squared =
         params.boundary_completion_max_profile_distance *
         params.boundary_completion_max_profile_distance;
-    for (size_t i = 0; i < bins.size(); ++i) {
-        const float dx = bins[i].local_x - predicted_x;
-        const float dy = bins[i].local_y - predicted_y;
-        const float distance_squared = dx * dx + dy * dy;
-        if (distance_squared <= maximum_distance_squared &&
-            distance_squared < nearest_distance_squared) {
-            nearest_distance_squared = distance_squared;
-            nearest_index = static_cast<int>(i);
+    if (!require_two_sided_turn) {
+        // 保留已经现场运行的 feature_points 单侧补角行为；更严格的两侧
+        // 转折验证只用于 rounded_features，避免改变旧模式的轨迹结果。
+        for (size_t i = 0; i < bins.size(); ++i) {
+            const float dx = bins[i].local_x - predicted_x;
+            const float dy = bins[i].local_y - predicted_y;
+            const float distance_squared = dx * dx + dy * dy;
+            if (distance_squared <= maximum_distance_squared &&
+                distance_squared < nearest_distance_squared) {
+                nearest_distance_squared = distance_squared;
+                turn_x = bins[i].local_x;
+                nearest_index = static_cast<int>(i);
+            }
+        }
+    }
+    const SeamSegmentType left_type = is_start_boundary
+        ? exterior_segment : visible_segment;
+    const SeamSegmentType right_type = is_start_boundary
+        ? visible_segment : exterior_segment;
+    for (size_t i = 0; require_two_sided_turn && i + 1 < runs.size(); ++i) {
+        if (!runs[i].valid || runs[i].type != left_type) continue;
+        for (size_t j = i + 1; j < runs.size(); ++j) {
+            if (!runs[j].valid || runs[j].type != right_type) continue;
+            bool interrupted = false;
+            for (size_t k = i + 1; k < j; ++k) {
+                if (runs[k].valid) interrupted = true;
+            }
+            if (interrupted) continue;
+            const float gap = runs[j].x_first - runs[i].x_last;
+            if (gap < 0.0f ||
+                gap > params.boundary_completion_max_profile_distance) continue;
+            const float candidate_x = 0.5f * (runs[i].x_last + runs[j].x_first);
+            for (size_t bin_index = 0; bin_index < bins.size(); ++bin_index) {
+                const float dx = bins[bin_index].local_x - candidate_x;
+                if (std::abs(dx) > params.profile_bin_width) continue;
+                const float px = candidate_x - predicted_x;
+                // 周期只预测焊接方向的位置；ROI/表面曲率会改变局部 Y，
+                // 因此 Y 不应覆盖两条已确认实测直线的转折证据。
+                const float distance_squared = px * px;
+                if (distance_squared <= maximum_distance_squared &&
+                    distance_squared < nearest_distance_squared) {
+                    nearest_distance_squared = distance_squared;
+                    turn_x = candidate_x;
+                    nearest_index = static_cast<int>(bin_index);
+                }
+            }
         }
     }
     if (nearest_index < 0) return false;
 
     const SeamProfileBin& nearest = bins[static_cast<size_t>(nearest_index)];
     int matching_segment_bins = 0;
+    int matching_exterior_bins = 0;
     for (size_t i = 0; i < bins.size(); ++i) {
         // ROI 起点只能验证角点右侧，ROI 末端只能验证角点左侧。跳过最靠近
         // 圆角中心的一个分箱宽度，避免把圆弧的 UNKNOWN 标签当作直线证据。
         const float inward_distance = is_start_boundary
-            ? bins[i].local_x - nearest.local_x
-            : nearest.local_x - bins[i].local_x;
+            ? bins[i].local_x - turn_x
+            : turn_x - bins[i].local_x;
         if (inward_distance < params.profile_bin_width ||
             inward_distance > params.boundary_completion_support_span) {
             continue;
         }
         if (bins[i].type == visible_segment) ++matching_segment_bins;
     }
-    if (matching_segment_bins < params.boundary_completion_min_support_bins) {
+    for (size_t i = 0; i < bins.size(); ++i) {
+        const float outward_distance = is_start_boundary
+            ? turn_x - bins[i].local_x
+            : bins[i].local_x - turn_x;
+        if (outward_distance < params.profile_bin_width ||
+            outward_distance > params.boundary_completion_support_span) {
+            continue;
+        }
+        if (bins[i].type == exterior_segment) ++matching_exterior_bins;
+    }
+    // 周期位置和单侧直线不能证明这里真有转角：特别是 ROI 恰好截在长平段
+    // 时，必须看到转角另一侧的实测轮廓，才允许补成机器人目标。
+    if (matching_segment_bins < params.boundary_completion_min_support_bins ||
+        (require_two_sided_turn &&
+         matching_exterior_bins < params.boundary_completion_min_support_bins)) {
         return false;
     }
 
     support.point = nearest;
     support.matching_segment_bins = matching_segment_bins;
+    support.matching_exterior_bins = matching_exterior_bins;
     support.distance_to_prediction = std::sqrt(nearest_distance_squared);
     return true;
 }
@@ -1360,6 +1422,8 @@ static CornerChainDiagnostics completePeriodicBoundaryCorners(
     const std::vector<WeldFeaturePoint>& structural_hints,
     const std::vector<SeamProfileSample>& samples,
     const std::vector<SeamProfileBin>& bins,
+    const std::vector<SeamLineRun>& runs,
+    bool require_two_sided_turn,
     const Eigen::Vector3f& n_bottom,
     float d_bottom,
     const Eigen::Vector3f& n_side,
@@ -1427,16 +1491,18 @@ static CornerChainDiagnostics completePeriodicBoundaryCorners(
                     corners[static_cast<size_t>(reference_next)];
                 BoundaryProfileSupport profile_support;
                 if (!findBoundaryProfileSupport(
-                        bins, predicted_x,
+                        bins, runs, predicted_x,
                         reference_corner.ideal_local.y() +
                             (corners[last].ideal_local.y() -
                              corners[static_cast<size_t>(previous_anchor)].ideal_local.y()),
-                        reference_corner.left_segment, false,
+                        reference_corner.left_segment,
+                        reference_corner.right_segment, false,
+                        require_two_sided_turn,
                         params, profile_support)) {
                     ++diagnostics.boundary_completion_rejected;
                     std::cerr << "Rejected one end-boundary completion at predicted local_x="
                         << predicted_x
-                        << ": no nearby measured profile with enough visible-side support."
+                        << ": no confirmed two-sided measured turn at the predicted boundary."
                         << std::endl;
                 } else {
                     WeldFeaturePoint completed = makePeriodicBoundaryCompletion(
@@ -1452,6 +1518,8 @@ static CornerChainDiagnostics completePeriodicBoundaryCorners(
                         << profile_support.distance_to_prediction
                         << " mm, visible_support_bins="
                         << profile_support.matching_segment_bins
+                        << ", exterior_support_bins="
+                        << profile_support.matching_exterior_bins
                         << (hint != nullptr ? ", using a boundary turn hint." : ".")
                         << std::endl;
                 }
@@ -1512,16 +1580,18 @@ static CornerChainDiagnostics completePeriodicBoundaryCorners(
                     corners[static_cast<size_t>(reference_previous)];
                 BoundaryProfileSupport profile_support;
                 if (!findBoundaryProfileSupport(
-                        bins, predicted_x,
+                        bins, runs, predicted_x,
                         reference_corner.ideal_local.y() +
                             (corners.front().ideal_local.y() -
                              corners[static_cast<size_t>(next_anchor)].ideal_local.y()),
-                        reference_corner.right_segment, true,
+                        reference_corner.right_segment,
+                        reference_corner.left_segment, true,
+                        require_two_sided_turn,
                         params, profile_support)) {
                     ++diagnostics.boundary_completion_rejected;
                     std::cerr << "Rejected one start-boundary completion at predicted local_x="
                         << predicted_x
-                        << ": no nearby measured profile with enough visible-side support."
+                        << ": no confirmed two-sided measured turn at the predicted boundary."
                         << std::endl;
                 } else {
                     WeldFeaturePoint completed = makePeriodicBoundaryCompletion(
@@ -1537,6 +1607,8 @@ static CornerChainDiagnostics completePeriodicBoundaryCorners(
                         << profile_support.distance_to_prediction
                         << " mm, visible_support_bins="
                         << profile_support.matching_segment_bins
+                        << ", exterior_support_bins="
+                        << profile_support.matching_exterior_bins
                         << (hint != nullptr ? ", using a boundary turn hint." : ".")
                         << std::endl;
                 }
@@ -1676,6 +1748,18 @@ static std::vector<WeldFeaturePoint> extractOrderedWeldFeatures(
         << ", bins=" << bins.size()
         << ", valid_line_runs=" << valid_run_count << "/" << runs.size()
         << std::endl;
+    if (require_adjacent_topology) {
+        std::cout << "Rounded profile extent: x=[" << bins.front().local_x
+            << ", " << bins.back().local_x << "] mm; valid runs:";
+        for (const SeamLineRun& run : runs) {
+            if (run.valid) {
+                std::cout << ' ' << static_cast<int>(run.type) << '['
+                    << run.x_first << ',' << run.x_last << "]@"
+                    << run.line.slope;
+            }
+        }
+        std::cout << std::endl;
+    }
     const float depth_split = estimateDepthLevelSplit(runs, bins);
     std::cout << "Corner-layer mapping: "
         << (params.protruding_is_larger_local_y
@@ -1793,12 +1877,30 @@ static std::vector<WeldFeaturePoint> extractOrderedWeldFeatures(
     // 合并同类近邻检测，再用四状态周期约束剔除平段内部的短假转折。
     const std::vector<WeldFeaturePoint> unique_features =
         mergeNearbyCornerDetections(features, params, n_bottom);
+    if (require_adjacent_topology) {
+        std::cout << "Rounded corner candidates (local_x/state/score):";
+        for (const WeldFeaturePoint& candidate : unique_features) {
+            std::cout << ' ' << candidate.ideal_local.x() << '/'
+                << static_cast<int>(candidate.topology_state) << '/'
+                << candidate.detection_score;
+        }
+        std::cout << std::endl;
+    }
     std::vector<WeldFeaturePoint> stabilized_features =
         selectTopologyConsistentCornerChain(
             unique_features, params, require_adjacent_topology);
+    if (require_adjacent_topology) {
+        std::cout << "Rounded selected corners (local_x/state):";
+        for (const WeldFeaturePoint& corner : stabilized_features) {
+            std::cout << ' ' << corner.ideal_local.x() << '/'
+                << static_cast<int>(corner.topology_state);
+        }
+        std::cout << std::endl;
+    }
     const CornerChainDiagnostics boundary_diagnostics =
         completePeriodicBoundaryCorners(
-        stabilized_features, structural_hints, samples, bins,
+        stabilized_features, structural_hints, samples, bins, runs,
+        require_adjacent_topology,
         n_bottom, d_bottom, n_side, d_side, n_tangent, params);
     if (chain_diagnostics != nullptr) {
         *chain_diagnostics = boundary_diagnostics;
@@ -2542,10 +2644,29 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
         return result;
     }
 
-    // rounded_features 的实际焊接边界由第一/最后确认角决定。ROI 红线在这两个
-    // 角之外即使有遮挡、点焊空洞或杂点，也不应让有效焊接区失败，更不能被用来
-    // 生成额外目标。保留一个实测搜索半径作为端点吸附余量；焊接区内部的大空洞
-    // 仍由 path.max_bridge_gap 严格拒绝。
+    const float uncovered_start = std::max(
+        0.0f, corners.front().ideal_local.x() - bins.front().local_x);
+    const float uncovered_end = std::max(
+        0.0f, bins.back().local_x - corners.back().ideal_local.x());
+    if (path_params.rounded_require_complete_topology &&
+        (uncovered_start > feature_params.max_corner_extrapolation ||
+         uncovered_end > feature_params.max_corner_extrapolation)) {
+        std::ostringstream stream;
+        stream << "rounded features: red seam extends " << uncovered_start
+               << " mm before first confirmed corner and " << uncovered_end
+               << " mm after last; limit is feature.max_corner_extrapolation="
+               << feature_params.max_corner_extrapolation
+               << " mm. Boundary corner is unconfirmed; refusing a truncated "
+                  "weld path. Reposition camera/ROI to include both sides of "
+                  "each required end corner";
+        error = stream.str();
+        return result;
+    }
+
+    // rounded_features 的实际焊接边界由第一/最后确认角决定。边界外只有
+    // 少量红点时不拿它们生成额外目标；若还有一大段真实红缝却没有确认角，
+    // 上面的检查会拒绝部分轨迹。保留实测搜索半径作端点吸附余量，焊接区
+    // 内部的大空洞仍由 path.max_bridge_gap 严格拒绝。
     const size_t full_profile_bin_count = bins.size();
     const float weld_profile_min_x = std::min(
         corners.front().local.x(), corners.front().ideal_local.x()) -
@@ -5423,7 +5544,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.1";
+    return "2.4.2";
 }
 
 std::string weld_seam_sdk::commandLineHelp()
