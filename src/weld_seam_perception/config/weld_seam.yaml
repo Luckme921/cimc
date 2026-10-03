@@ -177,7 +177,7 @@ weld_seam_node:
       # false: 工件 local_y 较小一层是凸角；true: 较大一层是凸角。
       # - "feature.protruding_is_larger_local_y=false"
 
-      # ==================== 路径输出模式（SDK 2.4.4） ====================
+      # ==================== 路径输出模式（SDK 2.4.5） ====================
       # path.mode=feature_points：每个识别拐角1点 + 首末安全点（旧现场模式）。
       # path.mode=rounded_features：复用已现场成功运行的四类姿态坐标系；
       # 检测链首末角各1个实测点，只有内部完整圆角展开5个实测点，
@@ -234,11 +234,15 @@ weld_seam_node:
       # 2个安全点 + 2个首末单点 + (N-2)*5个内部圆角点 + (N-1)个直线中点。
       # ROI包含多个周期时按实际角点数增加，但总数仍受 max_points=100 约束。
       # - "path.rounded_min_straight_span=8.0"
+      # 首末角之外若有同类实测直线，跨度至少达到此值才把其末端作为焊接
+      # 起止点；短孤立红点不延伸轨迹。端点和必要中点使用实测红点及直线姿态。
+      # - "path.rounded_boundary_min_straight_span=20.0"
       # 默认至少检测到一整组4类角；少于4类通常说明 ROI、平面或角点识别不完整，
       # 此时拒绝发布局部轨迹。只有明确需要焊接不足一周期时才谨慎调小。
       # - "path.rounded_min_corner_count=4"
       # true（推荐/默认）：检测链的第一和最后角各只输出中心1个实测点；只有
-      # 内部角才展开 point_count 个圆弧点。最后角之后不再向 ROI 杂点延伸中点。
+      # 内部角才展开 point_count 个圆弧点。首末若有充分支持的可见直线段，
+      # 另生成明确标记的实测焊接边界点；短边缘杂点不生成目标。
       # - "path.rounded_force_endpoint_single=true"
       # true（推荐/默认）：内部角类别必须严格按四类周期逐个相邻，若跳过任一类
       # 则整次提取失败，不向 ROS/ABB 发布“少一段直线”的危险轨迹。
@@ -255,7 +259,7 @@ weld_seam_node:
       # rounded_features 的每组5点在角点两侧稳健直线姿态间分摊转角；它不会读取
       # adaptive_contour 的 max_orientation_step_deg。若单步姿态仍大，可先比较
       # point_count=7，再检查相邻类别 work/lead 是否人为设置差别过大。
-      # SDK 2.4.4 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
+      # SDK 2.4.5 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
       # 两侧内部圆角共用该斜率，避免点焊/空洞造成两次独立拟合姿态不一致。
       - "orientation.protruding_left.work_angle_deg=35.0"
       - "orientation.protruding_right.work_angle_deg=35.0"
@@ -292,7 +296,7 @@ weld_seam_node:
       # rounded_features 的圆角/直线“偏移前”来自真实红点；配置非零偏置后，
       # 最终CSV/机器人目标有意不再与原始测量点重合，这是工艺补偿而不是识别误差。
       # 当前四类角启用了 -2/-5mm 的工件Z偏置；历史PLY回归显示它会把不少最终
-      # workpiece_z 推到检测底面以下。SDK 2.4.4 会打印 WARNING，并在CSV保留
+      # workpiece_z 推到检测底面以下。SDK 2.4.5 会打印 WARNING，并在CSV保留
       # raw_workpiece_z 供对比。这里保留现场现值，不在没有实机确认时擅自归零。
       # 仅取消某一行注释就覆盖该轴；其余轴继续使用SDK默认值。
       # 安全过渡点先继承相邻焊点所属类别偏置，再叠加 start/end_transition 微调，

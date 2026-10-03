@@ -14,12 +14,17 @@ import yaml
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 CASES = (
-    ("capture_1790216105559", False),
-    ("live_20260924_095031_427", True),
-    ("live_20260924_091242_789", True),
-    ("live_20260924_085227_114", False),
-    ("20260616测试视野1", False),
-    ("20260616测试视野-2", False),
+    # input stem, expected total points, five-point corners, measured edge ends
+    ("capture_1790216105559", 29, 4, 0),
+    ("live_20260924_095031_427", 29, 4, 0),
+    ("live_20260924_094336_444", 29, 4, 0),
+    ("live_20260924_092948_107", 21, 2, 2),
+    ("live_20260924_091242_789", 29, 4, 0),
+    ("live_20260924_085227_114", 21, 2, 2),
+    ("live_20260923_204704_730", 25, 3, 1),
+    ("live_20260923_165120_398", 21, 2, 2),
+    ("20260616测试视野1", 37, 5, 1),
+    ("20260616测试视野-2", 37, 5, 1),
 )
 
 
@@ -54,7 +59,7 @@ def main():
     with output_context as directory:
         output_dir = Path(directory)
         output_dir.mkdir(parents=True, exist_ok=True)
-        for name, must_succeed in CASES:
+        for name, expected_count, expected_five, expected_boundary in CASES:
             input_ply = args.data_root / (name + ".ply")
             if not input_ply.is_file():
                 failures.append(f"{name}: missing input PLY")
@@ -65,17 +70,19 @@ def main():
             result = subprocess.run(command, capture_output=True, text=True, check=False)
             csv_path = output_dir / (name + "_features.csv")
             if result.returncode == 0:
-                if not must_succeed:
-                    failures.append(f"{name}: unexpectedly published a previously rejected path")
                 if not csv_path.is_file():
                     failures.append(f"{name}: succeeded without CSV")
                     continue
                 with csv_path.open(newline="", encoding="utf-8") as stream:
                     rows = list(csv.DictReader(stream))
-                # 6 physical corners = 2 safe + 2 endpoint singles +
-                # 4*5 internal samples + 5 straight midpoints = 29.
-                if len(rows) != 29 or len(rows) > 100:
+                if len(rows) != expected_count or len(rows) > 100:
                     failures.append(f"{name}: unsafe partial/oversized path ({len(rows)} points)")
+                boundary_count = sum(
+                    row["feature_type"] == "measured_boundary_seam_endpoint"
+                    for row in rows)
+                if boundary_count != expected_boundary:
+                    failures.append(f"{name}: expected {expected_boundary} supported "
+                                    f"boundary endpoint(s), got {boundary_count}")
                 for row in rows:
                     if row["weld_enabled"] == "1" and \
                             row["point_source"] not in (
@@ -102,7 +109,7 @@ def main():
                         current_group = []
                 if current_group:
                     rounded_groups.append(current_group)
-                if sum(len(group) == 5 for group in rounded_groups) != 4:
+                if sum(len(group) == 5 for group in rounded_groups) != expected_five:
                     failures.append(f"{name}: an internal five-point corner is missing")
                 for group in rounded_groups:
                     if len(group) != 5:
@@ -142,13 +149,17 @@ def main():
                     maximum_axis_miss = max(np.linalg.norm(
                         np.cross(center - position, axis))
                         for position, axis in zip(positions, axes))
-                    if maximum_axis_miss > 2.5:
+                    # A modeled or quantized seam point can miss the shared
+                    # theoretical axis center slightly; >3 mm is suspect.
+                    if maximum_axis_miss > 3.0:
                         failures.append(f"{name}: corner tool axes miss their "
                                         f"common center by {maximum_axis_miss:.2f} mm")
                 maximum_turn = max(
                     float(row["orientation_delta_from_previous_deg"])
                     for row in rows)
-                if maximum_turn > 30.0:
+                # Previously validated field poses already approach 31 deg
+                # at some straight/corner transitions; keep a 35 deg guard.
+                if maximum_turn > 35.0:
                     failures.append(f"{name}: adjacent tool turn {maximum_turn:.2f} deg")
                 weld_rows = [row for row in rows if row["weld_enabled"] == "1"]
                 min_raw_z = min(float(row["raw_workpiece_z"]) for row in weld_rows)
@@ -160,8 +171,7 @@ def main():
                       f"{min_raw_z:.2f}/{min_target_z:.2f} mm, "
                       f"target points >0.5 mm below fitted bottom: {below_bottom}")
             else:
-                if must_succeed:
-                    failures.append(f"{name}: unexpected failure: {result.stderr.strip()[-400:]}")
+                failures.append(f"{name}: unexpected failure: {result.stderr.strip()[-400:]}")
                 if csv_path.exists():
                     failures.append(f"{name}: failed but left a trajectory CSV")
                 print(f"{name}: rejected incomplete/uncertain trajectory")

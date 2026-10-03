@@ -1,6 +1,6 @@
 # weld_seam_perception 包说明
 
-该包是焊缝 SDK 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。构建时至少要求 SDK 2.4.4，启动日志中的 SDK 版本是实际运行版本；修改算法源码后仍须重新编译、安装 SDK 并重建本包。
+该包是焊缝 SDK 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。构建时至少要求 SDK 2.4.5，启动日志中的 SDK 版本是实际运行版本；修改算法源码后仍须重新编译、安装 SDK 并重建本包。
 
 ## 文件作用
 
@@ -82,7 +82,7 @@ ROI、四类位置偏置、四类姿态等均可继续添加，不用重新编�
 - "path.mode=adaptive_contour"
 ```
 
-三行只能启用一行。当前 YAML 使用 `rounded_features`，圆角目标弧长间距为 3 mm；首末角各 1 点，内部完整圆角默认 5 点，确认角之间增加 1 个中点。可靠实测点优先；小空洞拟合点以 CSV 的 `point_source=modeled_small_hole_from_adjacent_lines` 和结果 PLY 的亮绿色十字星标记，不能当作实测点。内部四类跳类、目标顺序回退、首末覆盖不足时仍拒绝向手眼或 ABB 发布。三种模式都受含安全点在内的 100 点上限保护；ROS 仍按列名读取 `x,y,z,qw,qx,qy,qz`，`raw_*` 和 `point_source` 诊断列不改变手眼或 ABB 协议。
+三行只能启用一行。当前 YAML 使用 `rounded_features`，圆角目标弧长间距为 3 mm；首末已确认角各 1 点，内部完整圆角默认 5 点，确认角之间增加 1 个中点。若裁剪边界落在一段有充分实测支撑的直线上，还会增加实测边界焊接点及必要中点，而不是因为红缝超出角点便拒绝整条轨迹；CSV 以 `measured_boundary_seam_endpoint` 标记。可靠实测点优先；小空洞拟合点以 CSV 的 `point_source=modeled_small_hole_from_adjacent_lines` 和结果 PLY 的亮绿色十字星标记，不能当作实测点。内部四类跳类、目标顺序回退、跨度过大的空洞仍拒绝向手眼或 ABB 发布。三种模式都受含安全点在内的 100 点上限保护；ROS 仍按列名读取 `x,y,z,qw,qx,qy,qz`，`raw_*` 和 `point_source` 诊断列不改变手眼或 ABB 协议。
 
 ROI 是相机坐标下的额外裁剪，即使输入 PLY 已裁剪也会再次生效。当前 YAML 的 X/Y/Z 均为 `-inf/inf`，默认不裁剪；`roi.enable=true` 是为了以后按拍照位置填写边界即可生效，并非固定一个 X 区间。不同拍照位置不能假定共用同一 ROI：可先离线裁剪 PLY 并检查结果，或在该次运行前把相应边界写入 YAML。注意手工裁剪某个 PLY 不会自动裁剪下一次 ROS 相机节点生成的文件。全范围输入若仍包含视野外缘的多余红缝，首末覆盖保护可能拒绝发布轨迹；这不是 ROS 节点启动失败，不应只靠放大外推阈值消除。每次改 ROI 后先核对角点顺序和结果 PLY。
 
