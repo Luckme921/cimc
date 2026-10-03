@@ -177,10 +177,11 @@ weld_seam_node:
       # false: 工件 local_y 较小一层是凸角；true: 较大一层是凸角。
       # - "feature.protruding_is_larger_local_y=false"
 
-      # ==================== 路径输出模式（SDK 2.4.7） ====================
+      # ==================== 路径输出模式（SDK 2.4.8） ====================
       # path.mode=feature_points：每个识别拐角1点 + 首末安全点（旧现场模式）。
       # path.mode=rounded_features：复用已现场成功运行的四类姿态坐标系；
-      # 检测链首末角固定单点，内部完整圆角展开5点；
+      # 真正的路径首末焊点固定单点；确认角外若有较长实测直线，
+      # 该角属于路径内部，可以展开5点；其他内部完整圆角也展开5点。
       # 相邻确认角之间增加1个直线中点，长边界直线可额外增加实测端点。
       # path.mode=adaptive_contour：沿红色焊缝轮廓自适应离散；直线稀、曲率处密。
       # 三种模式的输出 CSV/PoseArray/手眼/ABB 接口完全相同，只是点数和采样方式不同。
@@ -237,9 +238,15 @@ weld_seam_node:
       # 首末角之外若有同类实测直线，跨度至少达到此值才把其末端作为焊接
       # 起止点；短孤立红点不延伸轨迹。端点和必要中点使用实测红点及直线姿态。
       # - "path.rounded_boundary_min_straight_span=20.0"
-      # 默认 false：固定首末确认角各1点（当前现场工艺要求）。只有明确需要
-      # 首末圆角多点时才改为 true；它会优先于 force_endpoint_single。
+      # 默认 false：不无条件展开检测链首末确认角。只有明确需要真正
+      # 路径首末角也多点时才改为 true；它会优先于 force_endpoint_single。
       - "path.rounded_expand_supported_end_corners=false"
+      # true：如果检测链首/末角外还有受支持的连续实测直线，那么实际焊接
+      # 边界是该直线端点，而且角到端点至少40mm，这个角属于路径内部，
+      # 允许按2mm间距展开5点。短边缘红缝仍按真正首末角处理。
+      # 没有外侧直线支撑的真正首末角仍各保留1点；证据不足会回退单点。
+      - "path.rounded_expand_boundary_attached_corners=true"
+      # - "path.rounded_boundary_corner_min_distance=40.0"
       # 首末圆角专用较密间距；内部圆角仍使用上面的 rounded_corner_spacing。
       # - "path.rounded_end_corner_spacing=2.0"
       # 同组圆角实测 local Z 极差不超过此值时，用稳健中位数高度统一五点，
@@ -248,8 +255,8 @@ weld_seam_node:
       # 默认至少检测到一整组4类角；少于4类通常说明 ROI、平面或角点识别不完整，
       # 此时拒绝发布局部轨迹。只有明确需要焊接不足一周期时才谨慎调小。
       # - "path.rounded_min_corner_count=4"
-      # true：关闭 expand_supported_end_corners 后，首末角强制单点；开启时
-      # 则仅在实测支撑充分的情况下展开，失败自动单点。首末可见长直线
+      # true：真正路径首末角强制单点；确认角外若有足够长的可见直线，
+      # 该确认角属于内部角，可以按上面的配置展开。首末可见长直线
       # 另生成明确标记的实测边界点；短边缘杂点不生成目标。
       # - "path.rounded_force_endpoint_single=true"
       # true（推荐/默认）：内部角类别必须严格按四类周期逐个相邻，若跳过任一类
@@ -267,7 +274,7 @@ weld_seam_node:
       # rounded_features 的每组5点在角点两侧稳健直线姿态间分摊转角；它不会读取
       # adaptive_contour 的 max_orientation_step_deg。若单步姿态仍大，可先比较
       # point_count=7，再检查相邻类别 work/lead 是否人为设置差别过大。
-      # SDK 2.4.7 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
+      # SDK 2.4.8 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
       # 两侧内部圆角共用该斜率，避免点焊/空洞造成两次独立拟合姿态不一致。
       - "orientation.protruding_left.work_angle_deg=35.0"
       - "orientation.protruding_right.work_angle_deg=35.0"

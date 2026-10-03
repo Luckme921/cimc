@@ -272,6 +272,8 @@ struct AdaptiveContourParams {
     float rounded_min_straight_span = 8.0f;
     float rounded_boundary_min_straight_span = 20.0f;
     bool rounded_expand_supported_end_corners = false;
+    bool rounded_expand_boundary_attached_corners = true;
+    float rounded_boundary_corner_min_distance = 40.0f;
     float rounded_end_corner_spacing = 2.0f;
     float rounded_corner_plane_max_spread = 5.0f;
     int rounded_min_corner_count = 4;
@@ -2998,7 +3000,23 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
     std::vector<float> corner_spacings(corners.size(), path_params.rounded_corner_spacing);
     for (size_t i = 0; i < corners.size(); ++i) {
         const bool end_corner = i == 0 || i + 1 == corners.size();
-        if (end_corner && path_params.rounded_expand_supported_end_corners)
+        // A detected edge corner is not the weld endpoint when a measured
+        // straight seam continues beyond it: that outer straight segment
+        // owns the actual boundary point. Keep true path-end corners single.
+        const float outer_straight_distance = i == 0
+            ? (extend_start ? corners.front().ideal_local.x() -
+                start_boundary_run.x_first : 0.0f)
+            : (i + 1 == corners.size() && extend_end
+                ? end_boundary_run.x_last - corners.back().ideal_local.x()
+                : 0.0f);
+        const bool boundary_attached = end_corner &&
+            path_params.rounded_expand_boundary_attached_corners &&
+            outer_straight_distance >=
+                path_params.rounded_boundary_corner_min_distance;
+        const bool expand_end_corner = end_corner &&
+            (path_params.rounded_expand_supported_end_corners ||
+             boundary_attached);
+        if (expand_end_corner)
             corner_spacings[i] = path_params.rounded_end_corner_spacing;
         const float half_span = static_cast<float>(half_corner_count) *
             corner_spacings[i];
@@ -3011,7 +3029,7 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
             corner_arcs[i] - half_span >= left_limit &&
             corner_arcs[i] + half_span <= right_limit;
         if (path_params.rounded_force_endpoint_single && end_corner &&
-            !path_params.rounded_expand_supported_end_corners) {
+            !expand_end_corner) {
             complete_corner_flags[i] = false;
         }
     }
@@ -3976,6 +3994,8 @@ static bool validateAdaptiveContourParams(
         params.rounded_boundary_min_straight_span <= 0.0f ||
         !std::isfinite(params.rounded_end_corner_spacing) ||
         params.rounded_end_corner_spacing <= 0.0f ||
+        !std::isfinite(params.rounded_boundary_corner_min_distance) ||
+        params.rounded_boundary_corner_min_distance <= 0.0f ||
         !std::isfinite(params.rounded_corner_plane_max_spread) ||
         params.rounded_corner_plane_max_spread <= 0.0f) {
         return fail("rounded feature spacing/search/span parameters must be finite and > 0.");
@@ -4848,6 +4868,8 @@ static int executeWeldSeamExtraction(
     APPLY_FLOAT("path.rounded_min_straight_span", adaptive_params.rounded_min_straight_span);
     APPLY_FLOAT("path.rounded_boundary_min_straight_span", adaptive_params.rounded_boundary_min_straight_span);
     APPLY_BOOL("path.rounded_expand_supported_end_corners", adaptive_params.rounded_expand_supported_end_corners);
+    APPLY_BOOL("path.rounded_expand_boundary_attached_corners", adaptive_params.rounded_expand_boundary_attached_corners);
+    APPLY_FLOAT("path.rounded_boundary_corner_min_distance", adaptive_params.rounded_boundary_corner_min_distance);
     APPLY_FLOAT("path.rounded_end_corner_spacing", adaptive_params.rounded_end_corner_spacing);
     APPLY_FLOAT("path.rounded_corner_plane_max_spread", adaptive_params.rounded_corner_plane_max_spread);
     APPLY_INT("path.rounded_min_corner_count", adaptive_params.rounded_min_corner_count);
@@ -5980,7 +6002,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.7";
+    return "2.4.8";
 }
 
 std::string weld_seam_sdk::commandLineHelp()

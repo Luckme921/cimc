@@ -14,17 +14,18 @@ import yaml
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 CASES = (
-    # input stem, expected total points, five-point corners, measured edge ends
-    ("capture_1790216105559", 29, 4, 0),
-    ("live_20260924_095031_427", 29, 4, 0),
-    ("live_20260924_094336_444", 29, 4, 0),
-    ("live_20260924_092948_107", 21, 2, 2),
-    ("live_20260924_091242_789", 29, 4, 0),
-    ("live_20260924_085227_114", 21, 2, 2),
-    ("live_20260923_204704_730", 25, 3, 1),
-    ("live_20260923_165120_398", 21, 2, 2),
-    ("20260616测试视野1", 37, 5, 1),
-    ("20260616测试视野-2", 37, 5, 1),
+    # input stem, total points, five-point corners, measured edge ends,
+    # first and last detected corner group sizes
+    ("capture_1790216105559", 29, 4, 0, 1, 1),
+    ("live_20260924_095031_427", 29, 4, 0, 1, 1),
+    ("live_20260924_094336_444", 29, 4, 0, 1, 1),
+    ("live_20260924_092948_107", 29, 4, 2, 5, 5),
+    ("live_20260924_091242_789", 29, 4, 0, 1, 1),
+    ("live_20260924_085227_114", 29, 4, 2, 5, 5),
+    ("live_20260923_204704_730", 29, 4, 1, 5, 1),
+    ("live_20260923_165120_398", 29, 4, 2, 5, 5),
+    ("20260616测试视野1", 37, 5, 1, 1, 1),
+    ("20260616测试视野-2", 37, 5, 1, 1, 1),
 )
 
 
@@ -52,7 +53,9 @@ def main():
     if "roi.min_x=-inf" not in overrides or "roi.max_x=inf" not in overrides:
         parser.error("active ROS YAML must leave X ROI at full range")
     if "path.rounded_expand_supported_end_corners=false" not in overrides:
-        parser.error("active ROS YAML must keep first and last confirmed corners single")
+        parser.error("active ROS YAML must not unconditionally expand edge corners")
+    if "path.rounded_expand_boundary_attached_corners=true" not in overrides:
+        parser.error("active ROS YAML must expand boundary-attached interior corners")
 
     failures = []
     output_context = (
@@ -61,7 +64,8 @@ def main():
     with output_context as directory:
         output_dir = Path(directory)
         output_dir.mkdir(parents=True, exist_ok=True)
-        for name, expected_count, expected_five, expected_boundary in CASES:
+        for name, expected_count, expected_five, expected_boundary, \
+                expected_first, expected_last in CASES:
             input_ply = args.data_root / (name + ".ply")
             if not input_ply.is_file():
                 failures.append(f"{name}: missing input PLY")
@@ -114,9 +118,10 @@ def main():
                     rounded_groups.append(current_group)
                 if sum(len(group) == 5 for group in rounded_groups) != expected_five:
                     failures.append(f"{name}: an internal five-point corner is missing")
-                if not rounded_groups or len(rounded_groups[0]) != 1 or \
-                        len(rounded_groups[-1]) != 1:
-                    failures.append(f"{name}: first/last confirmed corner is not single")
+                if not rounded_groups or \
+                        len(rounded_groups[0]) != expected_first or \
+                        len(rounded_groups[-1]) != expected_last:
+                    failures.append(f"{name}: detected edge corner group sizes are wrong")
                 # The safety point inherits the adjacent weld pose, so it
                 # cannot introduce an extra orientation jump during approach.
                 if rounded_groups and any(

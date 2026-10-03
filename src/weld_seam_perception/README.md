@@ -1,6 +1,6 @@
 # weld_seam_perception 包说明
 
-该包是焊缝 SDK 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。构建时至少要求 SDK 2.4.7，启动日志中的 SDK 版本是实际运行版本；修改算法源码后仍须重新编译、安装 SDK 并重建本包。
+该包是焊缝 SDK 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。构建时至少要求 SDK 2.4.8，启动日志中的 SDK 版本是实际运行版本；修改算法源码后仍须重新编译、安装 SDK 并重建本包。
 
 ## 文件作用
 
