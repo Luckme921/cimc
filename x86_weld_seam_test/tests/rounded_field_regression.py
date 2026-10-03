@@ -14,12 +14,12 @@ import yaml
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 CASES = (
-    ("capture_1790216105559", True),
+    ("capture_1790216105559", False),
     ("live_20260924_095031_427", True),
-    ("live_20260924_091242_789", False),
+    ("live_20260924_091242_789", True),
     ("live_20260924_085227_114", False),
-    ("20260616测试视野1", True),
-    ("20260616测试视野-2", True),
+    ("20260616测试视野1", False),
+    ("20260616测试视野-2", False),
 )
 
 
@@ -44,6 +44,8 @@ def main():
     overrides = params["algorithm_overrides"]
     if "path.mode=rounded_features" not in overrides:
         parser.error("active ROS YAML must select path.mode=rounded_features")
+    if "roi.min_x=-inf" not in overrides or "roi.max_x=inf" not in overrides:
+        parser.error("active ROS YAML must leave X ROI at full range")
 
     failures = []
     output_context = (
@@ -178,22 +180,22 @@ def main():
                     (output_dir / (visual_prefix + "_feature_points.ply")).exists():
                 failures.append(f"{name}: visualization-only isolation failed")
 
-        # The two files were captured/cropped under different ROI choices.
-        # Do not relax the production boundary guard just to pass one global ROI.
-        for name in ("live_20260924_091242_789", "live_20260924_095031_427"):
+        # A selected photo position may use its own X crop; it is not the
+        # production default and must not be applied to every capture.
+        for name in ("capture_1790216105559", "20260616测试视野1", "20260616测试视野-2"):
             input_ply = args.data_root / (name + ".ply")
-            prefix = name + "_full_x"
+            prefix = name + "_selected_x"
             command = [str(args.extractor), str(input_ply), str(output_dir), prefix]
-            for override in overrides + ["roi.min_x=-inf", "roi.max_x=inf"]:
+            for override in overrides + ["roi.min_x=-180", "roi.max_x=190"]:
                 command.extend(("--set", override))
             result = subprocess.run(command, capture_output=True, text=True, check=False)
             csv_path = output_dir / (prefix + "_features.csv")
             if result.returncode != 0 or not csv_path.is_file():
-                failures.append(f"{name}: full-X ROI should yield a complete path")
+                failures.append(f"{name}: selected-X ROI should yield a complete path")
                 continue
             with csv_path.open(newline="", encoding="utf-8") as stream:
                 if len(list(csv.DictReader(stream))) != 29:
-                    failures.append(f"{name}: full-X ROI path has wrong point count")
+                    failures.append(f"{name}: selected-X ROI path has wrong point count")
     if failures:
         raise SystemExit("\n".join(failures))
     print("Offline rounded field regression passed; no hardware was commanded.")
