@@ -271,7 +271,7 @@ struct AdaptiveContourParams {
     bool rounded_model_small_holes = true;
     float rounded_min_straight_span = 8.0f;
     float rounded_boundary_min_straight_span = 20.0f;
-    bool rounded_expand_supported_end_corners = true;
+    bool rounded_expand_supported_end_corners = false;
     float rounded_end_corner_spacing = 2.0f;
     float rounded_corner_plane_max_spread = 5.0f;
     int rounded_min_corner_count = 4;
@@ -5980,7 +5980,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.6";
+    return "2.4.7";
 }
 
 std::string weld_seam_sdk::commandLineHelp()

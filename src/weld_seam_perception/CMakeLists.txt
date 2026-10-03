@@ -8,7 +8,7 @@ find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 # Keep the ROS adapter tied to the verified rounded-path SDK release.
 # A stale installed SDK must fail at configure time instead of silently running.
-find_package(weld_seam_sdk 2.4.6 CONFIG REQUIRED)
+find_package(weld_seam_sdk 2.4.7 CONFIG REQUIRED)
 
 add_executable(weld_seam_node src/weld_seam_node.cpp)
 target_compile_features(weld_seam_node PRIVATE cxx_std_17)

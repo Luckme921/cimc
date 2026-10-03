@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(weld_seam_sdk VERSION 2.4.6 LANGUAGES CXX)
+project(weld_seam_sdk VERSION 2.4.7 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
