@@ -15,16 +15,16 @@ import yaml
 WORKSPACE = Path(__file__).resolve().parents[2]
 CASES = (
     # input stem, expected total points, five-point corners, measured edge ends
-    ("capture_1790216105559", 29, 4, 0),
-    ("live_20260924_095031_427", 29, 4, 0),
-    ("live_20260924_094336_444", 29, 4, 0),
-    ("live_20260924_092948_107", 21, 2, 2),
-    ("live_20260924_091242_789", 29, 4, 0),
-    ("live_20260924_085227_114", 21, 2, 2),
-    ("live_20260923_204704_730", 25, 3, 1),
-    ("live_20260923_165120_398", 21, 2, 2),
-    ("20260616测试视野1", 37, 5, 1),
-    ("20260616测试视野-2", 37, 5, 1),
+    ("capture_1790216105559", 37, 6, 0),
+    ("live_20260924_095031_427", 37, 6, 0),
+    ("live_20260924_094336_444", 37, 6, 0),
+    ("live_20260924_092948_107", 29, 4, 2),
+    ("live_20260924_091242_789", 37, 6, 0),
+    ("live_20260924_085227_114", 29, 4, 2),
+    ("live_20260923_204704_730", 33, 5, 1),
+    ("live_20260923_165120_398", 29, 4, 2),
+    ("20260616测试视野1", 45, 7, 1),
+    ("20260616测试视野-2", 45, 7, 1),
 )
 
 
@@ -87,11 +87,12 @@ def main():
                     if row["weld_enabled"] == "1" and \
                             row["point_source"] not in (
                                 "measured_red_seam_point",
+                                "measured_red_seam_xy_fitted_corner_plane_z",
                                 "modeled_small_hole_from_adjacent_lines"):
                         failures.append(f"{name}: unsupported point source at order {row['order']}")
                         break
                     if row["weld_enabled"] == "1" and \
-                            row["point_source"] == "measured_red_seam_point" and \
+                            row["point_source"].startswith("measured_red_seam") and \
                             float(row["distance_to_ideal"]) > 2.5001:
                         failures.append(f"{name}: remote measured snap at order {row['order']}")
                 for previous, current in zip(rows[1:-2], rows[2:-1]):
@@ -113,13 +114,16 @@ def main():
                     failures.append(f"{name}: an internal five-point corner is missing")
                 for group in rounded_groups:
                     if len(group) != 5:
-                        if group[0]["point_source"] != "measured_red_seam_point":
+                        if not group[0]["point_source"].startswith("measured_red_seam"):
                             failures.append(f"{name}: endpoint corner is not measured")
                         continue
                     if sum(row["point_source"] ==
                            "modeled_small_hole_from_adjacent_lines"
                            for row in group) > 3:
                         failures.append(f"{name}: corner relies on too many modeled points")
+                    z_values = [float(row["raw_workpiece_z"]) for row in group]
+                    if max(z_values) - min(z_values) > 0.1:
+                        failures.append(f"{name}: a rounded corner zigzags in local Z")
                     direction = 1 if float(group[-1]["raw_workpiece_y"]) >= \
                         float(group[0]["raw_workpiece_y"]) else -1
                     for previous, current in zip(group, group[1:]):
@@ -204,7 +208,7 @@ def main():
                 failures.append(f"{name}: selected-X ROI should yield a complete path")
                 continue
             with csv_path.open(newline="", encoding="utf-8") as stream:
-                if len(list(csv.DictReader(stream))) != 29:
+                if len(list(csv.DictReader(stream))) != 37:
                     failures.append(f"{name}: selected-X ROI path has wrong point count")
     if failures:
         raise SystemExit("\n".join(failures))

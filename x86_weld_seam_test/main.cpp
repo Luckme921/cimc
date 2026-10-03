@@ -271,6 +271,9 @@ struct AdaptiveContourParams {
     bool rounded_model_small_holes = true;
     float rounded_min_straight_span = 8.0f;
     float rounded_boundary_min_straight_span = 20.0f;
+    bool rounded_expand_supported_end_corners = true;
+    float rounded_end_corner_spacing = 2.0f;
+    float rounded_corner_plane_max_spread = 5.0f;
     int rounded_min_corner_count = 4;
 
     // 路径第一/最后角就是实际焊接边界：只保留各自中心实测点，避免在 ROI
@@ -454,6 +457,7 @@ struct WeldFeaturePoint {
     bool is_rounded_corner_sample = false;
     bool is_straight_midpoint = false;
     bool is_boundary_seam_endpoint = false;
+    bool is_corner_plane_fitted = false;
     bool is_modeled_gap_sample = false;
     int pose_group_override = -1;
 
@@ -1094,6 +1098,7 @@ static WeldFeaturePoint makeSafeTransitionPoint(
     transition.is_rounded_corner_sample = false;
     transition.is_straight_midpoint = false;
     transition.is_boundary_seam_endpoint = false;
+    transition.is_corner_plane_fitted = false;
     transition.distance_to_ideal = 0.0f;
     transition.merged_detection_count = 1;
 
@@ -2990,17 +2995,23 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
     }
     const float depth_split = medianOf(all_y);
     std::vector<bool> complete_corner_flags(corners.size(), false);
+    std::vector<float> corner_spacings(corners.size(), path_params.rounded_corner_spacing);
     for (size_t i = 0; i < corners.size(); ++i) {
+        const bool end_corner = i == 0 || i + 1 == corners.size();
+        if (end_corner && path_params.rounded_expand_supported_end_corners)
+            corner_spacings[i] = path_params.rounded_end_corner_spacing;
+        const float half_span = static_cast<float>(half_corner_count) *
+            corner_spacings[i];
         const float left_limit = i == 0 ? 0.0f :
             0.5f * (corner_arcs[i - 1] + corner_arcs[i]);
         const float right_limit = i + 1 == corners.size()
             ? profile.back().arc_length
             : 0.5f * (corner_arcs[i] + corner_arcs[i + 1]);
         complete_corner_flags[i] =
-            corner_arcs[i] - corner_half_span >= left_limit &&
-            corner_arcs[i] + corner_half_span <= right_limit;
-        if (path_params.rounded_force_endpoint_single &&
-            (i == 0 || i + 1 == corners.size())) {
+            corner_arcs[i] - half_span >= left_limit &&
+            corner_arcs[i] + half_span <= right_limit;
+        if (path_params.rounded_force_endpoint_single && end_corner &&
+            !path_params.rounded_expand_supported_end_corners) {
             complete_corner_flags[i] = false;
         }
     }
@@ -3014,6 +3025,9 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
     for (size_t corner_index = 0; corner_index < corners.size(); ++corner_index) {
         const float center_arc = corner_arcs[corner_index];
         const bool complete_corner = complete_corner_flags[corner_index];
+        const float corner_spacing = corner_spacings[corner_index];
+        const float active_half_span = static_cast<float>(half_corner_count) *
+            corner_spacing;
         const int first_offset = complete_corner ? -half_corner_count : 0;
         const int last_offset = complete_corner ? half_corner_count : 0;
         const size_t candidate_count_before_corner = candidates.size();
@@ -3022,12 +3036,12 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
                                               bool interpolate_pose,
                                               float minimum_separation) {
             const float target_arc = center_arc +
-                static_cast<float>(offset_index) * path_params.rounded_corner_spacing;
+                static_cast<float>(offset_index) * corner_spacing;
             float max_measured_local_x = std::numeric_limits<float>::infinity();
             if (offset_index < last_offset) {
                 float next_slope = 0.0f;
                 const Eigen::Vector3f next_target = interpolateAdaptiveLocal(
-                    profile, target_arc + path_params.rounded_corner_spacing,
+                    profile, target_arc + corner_spacing,
                     feature_params.local_fit_radius, next_slope);
                 max_measured_local_x = next_target.x() - 0.25f;
             }
@@ -3093,7 +3107,7 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
              offset_index <= last_offset; ++offset_index) {
             if (!append_corner_sample(
                     offset_index, complete_corner,
-                    0.50f * path_params.rounded_corner_spacing)) {
+                    0.50f * corner_spacing)) {
                 std::cerr << "Rounded corner[" << corner_index
                     << "] sample offset " << offset_index
                     << " lacks a selectable measured or supported modeled point;"
@@ -3123,6 +3137,40 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
                     "at least two measured red seam points are required";
                 return std::vector<WeldFeaturePoint>();
             }
+            // The seam root lies on the fitted bottom plane. Quantized depth
+            // and reflections can make five independently snapped samples
+            // zigzag in local Z. Fit one robust height per corner only when
+            // the measured spread is small; keep XY and tool poses unchanged.
+            std::vector<float> corner_heights;
+            for (size_t i = candidate_count_before_corner;
+                 i < candidates.size(); ++i) {
+                if (!candidates[i].feature.is_modeled_gap_sample)
+                    corner_heights.push_back(candidates[i].feature.local.z());
+            }
+            if (corner_heights.size() >= 2) {
+                const auto height_range = std::minmax_element(
+                    corner_heights.begin(), corner_heights.end());
+                if (*height_range.second - *height_range.first <=
+                    path_params.rounded_corner_plane_max_spread) {
+                    const float fitted_z = medianOf(corner_heights);
+                    for (size_t i = candidate_count_before_corner;
+                         i < candidates.size(); ++i) {
+                        WeldFeaturePoint& point = candidates[i].feature;
+                        if (std::abs(point.local.z() - fitted_z) > 0.1f)
+                            point.is_corner_plane_fitted = true;
+                        point.local.z() = fitted_z;
+                        point.world = localToWorld(
+                            point.local.x(), point.local.y(), fitted_z,
+                            n_bottom, d_bottom, n_side, d_side, n_tangent);
+                    }
+                } else {
+                    std::cerr << "Rounded corner[" << corner_index
+                        << "] measured Z spread "
+                        << (*height_range.second - *height_range.first)
+                        << " mm exceeds planar-fit limit; retaining measured Z."
+                        << std::endl;
+                }
+            }
         }
         if (sampled_complete_corner) ++complete_corner_count;
         else ++boundary_single_count;
@@ -3131,10 +3179,11 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
         // 定义焊接起止边界，禁止继续向 ROI 原始边缘延伸，以免末端杂点成为目标。
         if (corner_index + 1 >= corners.size()) continue;
         const float segment_begin = center_arc +
-            (sampled_complete_corner ? corner_half_span : 0.0f);
+            (sampled_complete_corner ? active_half_span : 0.0f);
         const float segment_end = corner_arcs[corner_index + 1] -
             (complete_corner_flags[corner_index + 1]
-                ? corner_half_span : 0.0f);
+                ? static_cast<float>(half_corner_count) *
+                    corner_spacings[corner_index + 1] : 0.0f);
         if (segment_end - segment_begin >= path_params.rounded_min_straight_span) {
             const float target_arc = 0.5f * (segment_begin + segment_end);
             WeldFeaturePoint feature = corners[corner_index];
@@ -3924,7 +3973,11 @@ static bool validateAdaptiveContourParams(
         !std::isfinite(params.rounded_min_straight_span) ||
         params.rounded_min_straight_span <= 0.0f ||
         !std::isfinite(params.rounded_boundary_min_straight_span) ||
-        params.rounded_boundary_min_straight_span <= 0.0f) {
+        params.rounded_boundary_min_straight_span <= 0.0f ||
+        !std::isfinite(params.rounded_end_corner_spacing) ||
+        params.rounded_end_corner_spacing <= 0.0f ||
+        !std::isfinite(params.rounded_corner_plane_max_spread) ||
+        params.rounded_corner_plane_max_spread <= 0.0f) {
         return fail("rounded feature spacing/search/span parameters must be finite and > 0.");
     }
     return true;
@@ -4071,7 +4124,9 @@ static bool saveFeatureCsv(
                 "_rounded_corner_sample";
             point_source = feature.is_modeled_gap_sample
                 ? "modeled_small_hole_from_adjacent_lines"
-                : "measured_red_seam_point";
+                : (feature.is_corner_plane_fitted
+                    ? "measured_red_seam_xy_fitted_corner_plane_z"
+                    : "measured_red_seam_point");
         } else if (feature.is_boundary_seam_endpoint) {
             feature_type = "measured_boundary_seam_endpoint";
             point_source = "measured_red_seam_point";
@@ -4792,6 +4847,9 @@ static int executeWeldSeamExtraction(
     APPLY_BOOL("path.rounded_model_small_holes", adaptive_params.rounded_model_small_holes);
     APPLY_FLOAT("path.rounded_min_straight_span", adaptive_params.rounded_min_straight_span);
     APPLY_FLOAT("path.rounded_boundary_min_straight_span", adaptive_params.rounded_boundary_min_straight_span);
+    APPLY_BOOL("path.rounded_expand_supported_end_corners", adaptive_params.rounded_expand_supported_end_corners);
+    APPLY_FLOAT("path.rounded_end_corner_spacing", adaptive_params.rounded_end_corner_spacing);
+    APPLY_FLOAT("path.rounded_corner_plane_max_spread", adaptive_params.rounded_corner_plane_max_spread);
     APPLY_INT("path.rounded_min_corner_count", adaptive_params.rounded_min_corner_count);
     APPLY_BOOL("path.rounded_force_endpoint_single", adaptive_params.rounded_force_endpoint_single);
     APPLY_BOOL("path.rounded_require_complete_topology", adaptive_params.rounded_require_complete_topology);
@@ -5754,7 +5812,9 @@ static int executeWeldSeamExtraction(
             feature_name = "ROUNDED_CORNER_SAMPLE";
             source_name = feature.is_modeled_gap_sample
                 ? "modeled small hole from adjacent lines; four-type corner pose"
-                : "measured red seam point; four-type corner pose";
+                : (feature.is_corner_plane_fitted
+                    ? "measured red seam XY; robust fitted corner-plane Z; four-type corner pose"
+                    : "measured red seam point; four-type corner pose");
         } else if (feature.is_boundary_seam_endpoint) {
             feature_name = "BOUNDARY_SEAM_ENDPOINT";
             source_name = "measured red seam point on a supported straight run";
@@ -5920,7 +5980,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.5";
+    return "2.4.6";
 }
 
 std::string weld_seam_sdk::commandLineHelp()
