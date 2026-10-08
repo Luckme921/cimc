@@ -25,6 +25,7 @@ chishine_camera_node:
     binary_ply: true
     depth_min_mm: 100
     depth_max_mm: 600
-    depth_gain: 1.0
-    depth_exposure: 8000.0
-    depth_frame_time: 10000.0
+    # 2026-10-08 同机位实测：焊点邻域成像最佳组合；曝光/帧时间单位为 us。
+    depth_gain: 2.0
+    depth_exposure: 14000.0
+    depth_frame_time: 20000.0
