@@ -172,6 +172,8 @@ class DataReceiverNode(Node):
             'abb_capture_command', 'START_CAPTURE').value.strip()
 
         # 2. TCP 异步可靠转发配置 (发给第三方设备)
+        self.third_party_link_enabled = bool(self.declare_parameter(
+            'third_party_link_enabled', True).value)
         self.forward_ip = self.declare_parameter(
             'forward_ip', '192.168.3.5').value
         self.forward_port = int(
@@ -256,18 +258,22 @@ class DataReceiverNode(Node):
 
         # 直接订阅焊机每个 TPDO1 的 6 字节真实反馈帧。
         # /weld/status 仍保留给人工诊断，不再从其 2 Hz 文本中提取字节。
-        self.weld_feedback_sub = self.create_subscription(
-            UInt8MultiArray,
-            self.weld_feedback_topic,
-            self.weld_feedback_callback,
-            10
-        )
+        self.weld_feedback_sub = None
+        if self.third_party_link_enabled:
+            self.weld_feedback_sub = self.create_subscription(
+                UInt8MultiArray,
+                self.weld_feedback_topic,
+                self.weld_feedback_callback,
+                10
+            )
 
         # 4. ROS 接口就绪后再启动第三方 TCP 线程，避免刚连接就收到命令时
         # 发布者尚未创建。
-        self.forward_thread = threading.Thread(target=self.tcp_forwarder_loop)
-        self.forward_thread.daemon = True
-        self.forward_thread.start()
+        self.forward_thread = None
+        if self.third_party_link_enabled:
+            self.forward_thread = threading.Thread(target=self.tcp_forwarder_loop)
+            self.forward_thread.daemon = True
+            self.forward_thread.start()
 
         # 5. 启动 ABB 接收主线程
         self.receive_thread = threading.Thread(target=self.tcp_server_loop)
@@ -278,10 +284,15 @@ class DataReceiverNode(Node):
         self.abb_sender_thread.start()
 
         self.get_logger().info(f"ABB 数据接收节点已启动，纯文本模式监听: {self.host}:{self.port} ...")
-        self.get_logger().info(
-            f"第三方 JSONL v{THIRD_PARTY_PROTOCOL_VERSION} 双向通道: "
-            f"{self.forward_ip}:{self.forward_port}, "
-            f"command_enabled={self.third_party_command_enabled}")
+        if self.third_party_link_enabled:
+            self.get_logger().info(
+                f"第三方 JSONL v{THIRD_PARTY_PROTOCOL_VERSION} 双向通道: "
+                f"{self.forward_ip}:{self.forward_port}, "
+                f"command_enabled={self.third_party_command_enabled}")
+        else:
+            self.get_logger().info(
+                'ABB-only mode: third-party TCP link and weld feedback '
+                'subscription are disabled.')
 
     def next_forward_sequence(self):
         with self.forward_sequence_lock:
@@ -298,6 +309,8 @@ class DataReceiverNode(Node):
         return encode_protocol_frame(frame)
 
     def queue_outbound_frame(self, frame_type, **fields):
+        if not self.third_party_link_enabled:
+            return
         try:
             self.forward_queue.put_nowait(
                 self.build_outbound_frame(frame_type, **fields))

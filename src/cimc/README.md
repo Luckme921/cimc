@@ -90,6 +90,11 @@ ABB 192.168.3.2 -> 本机 192.168.3.100:45000 -> ROS 话题
 - 发布 `/cimc/motor_speed`：把第三方旋转速度直接交给现有电机节点；
 - 发布 `/third_party/status`：记录第三方请求在协议层是否接受。
 
+当前 `camera_weld_handeye_abb_test.launch.py` 使用 ABB-only 配置：
+`data_receiver.yaml` 的 `third_party_link_enabled=false`，因此不启动
+192.168.3.5 TCP 线程、也不订阅焊机反馈；上述第三方接口仅为以后单独启用时保留。
+ABB 收发、拍照和任务耗时逻辑不受这个开关影响。
+
 可调 ROS 参数：
 
 | 参数 | 默认值 | 含义 |
@@ -99,6 +104,7 @@ ABB 192.168.3.2 -> 本机 192.168.3.100:45000 -> ROS 话题
 | `abb_allowed_ip` | `192.168.3.2` | 只允许该 ABB 来源 IP |
 | `abb_max_line_bytes` | `4096` | ABB 换行分帧 ASCII 单行最大字节数 |
 | `abb_capture_command` | `START_CAPTURE` | 启动 ABB 端到端计时的命令前缀，必须与协调器 `start_command` 一致 |
+| `third_party_link_enabled` | 当前 YAML 为 `false` | `false` 时只运行 ABB 通道，不连接第三方设备或订阅焊机反馈 |
 | `forward_ip` | `192.168.3.5` | 第三方控制设备地址 |
 | `forward_port` | `50000` | 第三方 TCP 服务端口 |
 | `forward_queue_size` | `500` | 非阻塞转发队列容量 |

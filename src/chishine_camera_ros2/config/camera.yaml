@@ -14,6 +14,10 @@ chishine_camera_node:
     output_directory: ""
     file_prefix: "capture"
     capture_timeout_ms: 5000
+    # 极稀疏深度帧（现场曾仅2点）视为采集失败：最多重拍3次，避免将坏PLY送往ABB。
+    # 比例针对整幅深度帧，当前正常960x600帧约40多万点/57.6万像素。
+    capture_max_attempts: 3
+    min_valid_depth_ratio: 0.25
     depth_width: 0
     depth_height: 0
     depth_fps: 0.0

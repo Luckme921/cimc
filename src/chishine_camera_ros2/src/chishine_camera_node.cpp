@@ -71,6 +71,9 @@ public:
         }
         file_prefix_ = declare_parameter<std::string>("file_prefix", "capture");
         capture_timeout_ms_ = declare_parameter<int>("capture_timeout_ms", 5000);
+        capture_max_attempts_ = declare_parameter<int>("capture_max_attempts", 3);
+        min_valid_depth_ratio_ = declare_parameter<double>(
+            "min_valid_depth_ratio", 0.25);
         depth_width_ = declare_parameter<int>("depth_width", 0);
         depth_height_ = declare_parameter<int>("depth_height", 0);
         depth_fps_ = declare_parameter<double>("depth_fps", 0.0);
@@ -97,6 +100,13 @@ public:
         }
         if (capture_timeout_ms_ <= 0) {
             throw std::invalid_argument("capture_timeout_ms must be > 0.");
+        }
+        if (capture_max_attempts_ <= 0 ||
+            !std::isfinite(min_valid_depth_ratio_) ||
+            min_valid_depth_ratio_ < 0.0 || min_valid_depth_ratio_ >= 1.0) {
+            throw std::invalid_argument(
+                "capture_max_attempts must be > 0 and "
+                "min_valid_depth_ratio must be in [0, 1).");
         }
         if (depth_min_mm_ < 0 || depth_max_mm_ <= depth_min_mm_) {
             throw std::invalid_argument(
@@ -356,93 +366,126 @@ private:
     std::string captureOnePointCloud()
     {
         if (!camera_) throw std::runtime_error("Camera is not connected.");
-        const ERROR_CODE trigger_result = camera_->softTrigger();
-        if (trigger_result != SUCCESS) {
-            throw std::runtime_error(
-                "softTrigger failed, error=" + std::to_string(trigger_result));
-        }
-
-        cs::IFramePtr depth_frame;
-        cs::IFramePtr rgb_frame;
-        ERROR_CODE frame_result = SUCCESS;
-        if (enable_rgb_) {
-            frame_result = camera_->getPairedFrame(
-                depth_frame, rgb_frame, capture_timeout_ms_);
-        } else {
-            frame_result = camera_->getFrame(
-                STREAM_TYPE_DEPTH, depth_frame, capture_timeout_ms_);
-        }
-        if (frame_result != SUCCESS || !depth_frame) {
-            throw std::runtime_error(
-                "Frame acquisition failed, error=" + std::to_string(frame_result));
-        }
-
-        PropertyExtension scale_property{};
-        float depth_scale = 0.1f;
-        if (camera_->getPropertyExtension(
-                PROPERTY_EXT_DEPTH_SCALE, scale_property) == SUCCESS) {
-            depth_scale = scale_property.depthScale;
-        }
-        if (!std::isfinite(depth_scale) || depth_scale <= 0.0f) {
-            RCLCPP_WARN(get_logger(),
-                "Camera returned invalid depth scale; falling back to 0.1 mm/unit.");
-            depth_scale = 0.1f;
-        }
-
-        // startDepthStream()/startRgbStream() 已保证整帧分别是 Z16/RGB8。
-        // 厂商 SamplePointReconstruction 对点云重建使用无参 getData()；
-        // FRAME_DATA_FORMAT_RGB8 在 3.2.52 中不存在，不能当作帧分量枚举使用。
-        auto* depth_data = reinterpret_cast<unsigned short*>(
-            const_cast<char*>(depth_frame->getData()));
-        if (!depth_data) throw std::runtime_error("Z16 depth data is null.");
-        if (depth_frame->getFormat() != STREAM_FORMAT_Z16) {
-            throw std::runtime_error("Depth frame is not STREAM_FORMAT_Z16.");
-        }
-
-        cs::Pointcloud pointcloud;
-        unsigned char* rgb_data = nullptr;
-        int rgb_width = 0;
-        int rgb_height = 0;
-        if (enable_rgb_ && rgb_frame) {
-            if (rgb_frame->getFormat() != STREAM_FORMAT_RGB8) {
-                throw std::runtime_error("RGB frame is not STREAM_FORMAT_RGB8.");
+        std::size_t last_valid_points = 0;
+        std::size_t last_total_pixels = 0;
+        for (int attempt = 1; attempt <= capture_max_attempts_; ++attempt) {
+            const ERROR_CODE trigger_result = camera_->softTrigger();
+            if (trigger_result != SUCCESS) {
+                throw std::runtime_error(
+                    "softTrigger failed, error=" + std::to_string(trigger_result));
             }
-            rgb_data = reinterpret_cast<unsigned char*>(
-                const_cast<char*>(rgb_frame->getData()));
-            if (rgb_data) {
-                rgb_width = rgb_frame->getWidth();
-                rgb_height = rgb_frame->getHeight();
+
+            cs::IFramePtr depth_frame;
+            cs::IFramePtr rgb_frame;
+            ERROR_CODE frame_result = SUCCESS;
+            if (enable_rgb_) {
+                frame_result = camera_->getPairedFrame(
+                    depth_frame, rgb_frame, capture_timeout_ms_);
+            } else {
+                frame_result = camera_->getFrame(
+                    STREAM_TYPE_DEPTH, depth_frame, capture_timeout_ms_);
+            }
+            if (frame_result != SUCCESS || !depth_frame) {
+                throw std::runtime_error(
+                    "Frame acquisition failed, error=" + std::to_string(frame_result));
+            }
+
+            PropertyExtension scale_property{};
+            float depth_scale = 0.1f;
+            if (camera_->getPropertyExtension(
+                    PROPERTY_EXT_DEPTH_SCALE, scale_property) == SUCCESS) {
+                depth_scale = scale_property.depthScale;
+            }
+            if (!std::isfinite(depth_scale) || depth_scale <= 0.0f) {
+                RCLCPP_WARN(get_logger(),
+                    "Camera returned invalid depth scale; falling back to 0.1 mm/unit.");
+                depth_scale = 0.1f;
+            }
+
+            // startDepthStream()/startRgbStream() 已保证整帧分别是 Z16/RGB8。
+            // 厂商 SamplePointReconstruction 对点云重建使用无参 getData()；
+            // FRAME_DATA_FORMAT_RGB8 在 3.2.52 中不存在，不能当作帧分量枚举使用。
+            auto* depth_data = reinterpret_cast<unsigned short*>(
+                const_cast<char*>(depth_frame->getData()));
+            if (!depth_data) throw std::runtime_error("Z16 depth data is null.");
+            if (depth_frame->getFormat() != STREAM_FORMAT_Z16) {
+                throw std::runtime_error("Depth frame is not STREAM_FORMAT_Z16.");
+            }
+            const std::size_t total_pixels =
+                static_cast<std::size_t>(depth_frame->getWidth()) *
+                static_cast<std::size_t>(depth_frame->getHeight());
+            std::size_t raw_nonzero_depth = 0;
+            for (std::size_t pixel = 0; pixel < total_pixels; ++pixel) {
+                if (depth_data[pixel] != 0) ++raw_nonzero_depth;
+            }
+
+            cs::Pointcloud pointcloud;
+            unsigned char* rgb_data = nullptr;
+            int rgb_width = 0;
+            int rgb_height = 0;
+            if (enable_rgb_ && rgb_frame) {
+                if (rgb_frame->getFormat() != STREAM_FORMAT_RGB8) {
+                    throw std::runtime_error("RGB frame is not STREAM_FORMAT_RGB8.");
+                }
+                rgb_data = reinterpret_cast<unsigned char*>(
+                    const_cast<char*>(rgb_frame->getData()));
+                if (rgb_data) {
+                    rgb_width = rgb_frame->getWidth();
+                    rgb_height = rgb_frame->getHeight();
+                    pointcloud.generatePoints(
+                        depth_data, depth_frame->getWidth(), depth_frame->getHeight(),
+                        depth_scale, &depth_intrinsics_, &rgb_intrinsics_,
+                        &rgb_extrinsics_, true);
+                }
+            }
+            if (!rgb_data) {
                 pointcloud.generatePoints(
                     depth_data, depth_frame->getWidth(), depth_frame->getHeight(),
-                    depth_scale, &depth_intrinsics_, &rgb_intrinsics_,
-                    &rgb_extrinsics_, true);
+                    depth_scale, &depth_intrinsics_, nullptr, nullptr, true);
             }
-        }
-        if (!rgb_data) {
-            pointcloud.generatePoints(
-                depth_data, depth_frame->getWidth(), depth_frame->getHeight(),
-                depth_scale, &depth_intrinsics_, nullptr, nullptr, true);
-        }
-        if (pointcloud.size() == 0) {
-            throw std::runtime_error("Point reconstruction produced zero valid points.");
-        }
+            last_valid_points = static_cast<std::size_t>(pointcloud.size());
+            last_total_pixels = total_pixels;
+            const double valid_ratio = total_pixels == 0 ? 0.0 :
+                static_cast<double>(last_valid_points) /
+                static_cast<double>(total_pixels);
+            if (last_valid_points == 0 || valid_ratio < min_valid_depth_ratio_) {
+                RCLCPP_WARN(get_logger(),
+                    "Discarding sparse depth frame %d/%d: %zu/%zu PLY points, "
+                    "%zu nonzero raw depth pixels "
+                    "(%.2f%%; required %.2f%%).",
+                    attempt, capture_max_attempts_, last_valid_points,
+                    total_pixels, raw_nonzero_depth, valid_ratio * 100.0,
+                    min_valid_depth_ratio_ * 100.0);
+                continue;
+            }
 
-        const std::filesystem::path directory(output_directory_);
-        std::error_code directory_error;
-        std::filesystem::create_directories(directory, directory_error);
-        if (directory_error) {
-            throw std::runtime_error(
-                "Cannot create output directory: " + directory_error.message());
+            const std::filesystem::path directory(output_directory_);
+            std::error_code directory_error;
+            std::filesystem::create_directories(directory, directory_error);
+            if (directory_error) {
+                throw std::runtime_error(
+                    "Cannot create output directory: " + directory_error.message());
+            }
+            const std::filesystem::path output_path =
+                directory / (file_prefix_ + "_" + timestampSuffix() + ".ply");
+            pointcloud.exportToFile(
+                output_path.string(), rgb_data, rgb_width, rgb_height, binary_ply_);
+            if (!std::filesystem::exists(output_path) ||
+                std::filesystem::file_size(output_path) == 0) {
+                throw std::runtime_error("Point-cloud export did not create a valid file.");
+            }
+            RCLCPP_INFO(get_logger(),
+                "Accepted depth frame %d/%d: %zu/%zu PLY points, "
+                "%zu nonzero raw depth pixels (%.2f%%).",
+                attempt, capture_max_attempts_, last_valid_points,
+                total_pixels, raw_nonzero_depth, valid_ratio * 100.0);
+            return std::filesystem::absolute(output_path).string();
         }
-        const std::filesystem::path output_path =
-            directory / (file_prefix_ + "_" + timestampSuffix() + ".ply");
-        pointcloud.exportToFile(
-            output_path.string(), rgb_data, rgb_width, rgb_height, binary_ply_);
-        if (!std::filesystem::exists(output_path) ||
-            std::filesystem::file_size(output_path) == 0) {
-            throw std::runtime_error("Point-cloud export did not create a valid file.");
-        }
-        return std::filesystem::absolute(output_path).string();
+        throw std::runtime_error(
+            "All depth capture attempts were too sparse: " +
+            std::to_string(last_valid_points) + "/" +
+            std::to_string(last_total_pixels) + " valid points on last frame; "
+            "no PLY was published.");
     }
 
     std::string camera_serial_;
@@ -454,6 +497,8 @@ private:
     std::string output_directory_;
     std::string file_prefix_;
     int capture_timeout_ms_ = 5000;
+    int capture_max_attempts_ = 3;
+    double min_valid_depth_ratio_ = 0.25;
     int depth_width_ = 0;
     int depth_height_ = 0;
     double depth_fps_ = 0.0;

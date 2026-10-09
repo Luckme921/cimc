@@ -31,16 +31,21 @@ Transient Local 让稍后启动的焊缝节点也能收到最近一次成功采�
 | `output_directory` | 空 | 默认 `~/scut_weld_data/pointclouds` |
 | `file_prefix` | `capture` | PLY 文件名前缀，后接毫秒时间戳 |
 | `capture_timeout_ms` | `5000` | 软件触发后的取帧超时 |
+| `capture_max_attempts` | `3` | 极稀疏帧最多触发次数；始终不达标则采集失败、不发布 PLY |
+| `min_valid_depth_ratio` | `0.25` | 重建点数/整幅深度像素数的最低比例；按当前视野选择，不能当作焊缝质量证明 |
 | `depth_width/height/fps` | `0` | `0` 表示接受第一种匹配 Z16 流 |
 | `rgb_width/height/fps` | `0` | 只在 `enable_rgb=true` 时使用 |
 | `enable_rgb` | `false` | 焊缝算法只需 XYZ；默认关闭以减少等待和裁剪 |
 | `binary_ply` | `true` | 二进制 PLY 更快更小 |
-| `depth_min_mm/max_mm` | `460/520` | 深度算法工作范围 |
-| `depth_gain` | `1.0` | 深度增益 |
-| `depth_exposure` | `8000` | 深度曝光 |
-| `depth_frame_time` | `10000` | 深度帧时间 |
+| `depth_min_mm/max_mm` | `100/600` | 当前相机配置的深度算法工作范围 |
+| `depth_gain` | `2.0` | 当前现场选定的深度增益 |
+| `depth_exposure` | `14000` | 当前现场选定的深度曝光，单位 µs |
+| `depth_frame_time` | `20000` | 当前现场选定的深度帧时间，单位 µs |
 
 参数文件路径：`config/camera.yaml`。
+若终端报告 `Discarding sparse depth frame`，同时看 `nonzero raw depth pixels`
+和 `PLY points`：前者也少说明 SDK 收到的深度图本身稀疏；前者正常而后者少则需排查重建、内参/深度比例。
+这个检查仅防止极端坏帧进入焊缝算法，不能自动补齐局部空洞。
 
 ## IP 与序列号
 

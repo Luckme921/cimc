@@ -1,3 +1,4 @@
+import queue
 import unittest
 
 from geometry_msgs.msg import Pose, PoseArray
@@ -82,6 +83,15 @@ def _request(frame_type, sequence, **fields):
 
 
 class ThirdPartyProtocolTest(unittest.TestCase):
+    def test_abb_only_mode_does_not_queue_third_party_frames(self):
+        bridge = type('BridgeStub', (), {
+            'third_party_link_enabled': False,
+            'forward_queue': queue.Queue(),
+        })()
+        DataReceiverNode.queue_outbound_frame(
+            bridge, 'abb_task_timing', task_id=1)
+        self.assertTrue(bridge.forward_queue.empty())
+
     def test_abb_task_timer_statistics_and_duplicate_start(self):
         timer = AbbTaskTimer()
 

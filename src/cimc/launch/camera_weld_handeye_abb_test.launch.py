@@ -45,6 +45,10 @@ def _validate_abb_test_configuration(context, *config_substitutions):
     listen_port = receiver_params.get('listen_port')
     receiver_command = str(
         receiver_params.get('abb_capture_command', '')).strip()
+    if receiver_params.get('third_party_link_enabled') is not False:
+        raise RuntimeError(
+            'ABB-only launch requires data_receiver.yaml '
+            'third_party_link_enabled=false.')
     coordinator_command = str(
         coordinator_params.get('start_command', '')).strip()
     if not listen_host or not allowed_ip or listen_port is None:
@@ -62,7 +66,7 @@ def _validate_abb_test_configuration(context, *config_substitutions):
     return [LogInfo(msg=[
         'ABB I/O preflight passed: x86=', listen_host, ':',
         str(listen_port), ', ABB=', allowed_ip,
-        ', send_to_abb=true.'])]
+        ', send_to_abb=true, third_party_link_enabled=false.'])]
 
 
 def generate_launch_description():
@@ -116,10 +120,11 @@ def generate_launch_description():
             'echo_trajectory', default_value='true',
             choices=['true', 'false']),
 
-        LogInfo(msg='Starting camera + weld + hand-eye + ABB I/O test chain.'),
+        LogInfo(msg='Starting camera + weld + hand-eye + ABB-only I/O chain.'),
         LogInfo(msg=(
-            'Safety boundary: the ABB peer may only store/print received points. '
-            'No robot motion, weld-controller, weld-logic, or motor node is started.')),
+            'No robot-motion, weld-controller, weld-logic, or motor node is '
+            'started here. ABB-side program alone decides whether to move; '
+            'verify its mode before sending START_CAPTURE.')),
         LogInfo(msg=(
             'All node parameters come from src config YAML files; this launch '
             'does not override parameter values.')),
