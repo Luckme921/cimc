@@ -500,7 +500,7 @@ class DataReceiverNode(Node):
             self.abb_task_timer.set_task_id(status.get('task_id'))
         elif state == 'fault':
             self.finish_abb_task_timing(
-                False, f"workflow fault: {status.get('message', 'unknown')}")
+                False, f"任务流程失败，未向ABB发送轨迹：{status.get('message', '未知原因')}")
 
     def start_abb_task_timing(self):
         record = self.abb_task_timer.start(time.perf_counter_ns())

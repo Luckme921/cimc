@@ -13,6 +13,7 @@ from cimc.data_receiver_node import (
     extract_jsonl_lines,
 )
 from cimc.handeye_abb_bridge_node import HandeyeAbbBridgeNode
+from cimc.weld_task_coordinator_node import explain_failure
 
 
 class _PublisherRecorder:
@@ -83,6 +84,12 @@ def _request(frame_type, sequence, **fields):
 
 
 class ThirdPartyProtocolTest(unittest.TestCase):
+    def test_sparse_pointcloud_failure_has_chinese_diagnosis(self):
+        reason = 'No valid normals are available after processing.'
+        explained = explain_failure(reason)
+        self.assertIn('点云处理后没有有效法线', explained)
+        self.assertIn(reason, explained)
+
     def test_abb_only_mode_does_not_queue_third_party_frames(self):
         bridge = type('BridgeStub', (), {
             'third_party_link_enabled': False,

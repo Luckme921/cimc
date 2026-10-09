@@ -359,7 +359,7 @@ private:
         } catch (const std::exception& exception) {
             response->success = false;
             response->message = exception.what();
-            RCLCPP_ERROR(get_logger(), "Capture failed: %s", exception.what());
+            RCLCPP_ERROR(get_logger(), "相机采集失败，本次不发布点云：%s", exception.what());
         }
     }
 
@@ -368,6 +368,7 @@ private:
         if (!camera_) throw std::runtime_error("Camera is not connected.");
         std::size_t last_valid_points = 0;
         std::size_t last_total_pixels = 0;
+        std::size_t last_raw_nonzero_depth = 0;
         for (int attempt = 1; attempt <= capture_max_attempts_; ++attempt) {
             const ERROR_CODE trigger_result = camera_->softTrigger();
             if (trigger_result != SUCCESS) {
@@ -445,17 +446,20 @@ private:
             }
             last_valid_points = static_cast<std::size_t>(pointcloud.size());
             last_total_pixels = total_pixels;
+            last_raw_nonzero_depth = raw_nonzero_depth;
             const double valid_ratio = total_pixels == 0 ? 0.0 :
                 static_cast<double>(last_valid_points) /
                 static_cast<double>(total_pixels);
             if (last_valid_points == 0 || valid_ratio < min_valid_depth_ratio_) {
                 RCLCPP_WARN(get_logger(),
-                    "Discarding sparse depth frame %d/%d: %zu/%zu PLY points, "
-                    "%zu nonzero raw depth pixels "
-                    "(%.2f%%; required %.2f%%).",
+                    "点云过少，丢弃本帧并重拍（第 %d/%d 次）：PLY 有效点 %zu/%zu，"
+                    "原始深度非零像素 %zu，点云有效率 %.2f%%，最低要求 %.2f%%。%s",
                     attempt, capture_max_attempts_, last_valid_points,
                     total_pixels, raw_nonzero_depth, valid_ratio * 100.0,
-                    min_valid_depth_ratio_ * 100.0);
+                    min_valid_depth_ratio_ * 100.0,
+                    raw_nonzero_depth < total_pixels * min_valid_depth_ratio_ ?
+                    "原始深度本身稀疏，请检查反光/黑色表面、遮挡、距离和曝光。" :
+                    "原始深度有值但点云稀疏，请检查深度范围、尺度和SDK重建。");
                 continue;
             }
 
@@ -475,17 +479,19 @@ private:
                 throw std::runtime_error("Point-cloud export did not create a valid file.");
             }
             RCLCPP_INFO(get_logger(),
-                "Accepted depth frame %d/%d: %zu/%zu PLY points, "
-                "%zu nonzero raw depth pixels (%.2f%%).",
+                "点云采集通过（第 %d/%d 次）：PLY 有效点 %zu/%zu，"
+                "原始深度非零像素 %zu，有效率 %.2f%%。",
                 attempt, capture_max_attempts_, last_valid_points,
                 total_pixels, raw_nonzero_depth, valid_ratio * 100.0);
             return std::filesystem::absolute(output_path).string();
         }
         throw std::runtime_error(
-            "All depth capture attempts were too sparse: " +
+            "连续 " + std::to_string(capture_max_attempts_) +
+            " 次拍照的点云均过少；最后一帧PLY有效点 " +
             std::to_string(last_valid_points) + "/" +
-            std::to_string(last_total_pixels) + " valid points on last frame; "
-            "no PLY was published.");
+            std::to_string(last_total_pixels) + "，原始深度非零像素 " +
+            std::to_string(last_raw_nonzero_depth) +
+            "。本次不发布PLY，也不会生成ABB轨迹；请检查上方逐帧诊断。");
     }
 
     std::string camera_serial_;

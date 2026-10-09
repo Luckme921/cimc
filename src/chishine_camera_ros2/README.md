@@ -43,8 +43,8 @@ Transient Local 让稍后启动的焊缝节点也能收到最近一次成功采�
 | `depth_frame_time` | `20000` | 当前现场选定的深度帧时间，单位 µs |
 
 参数文件路径：`config/camera.yaml`。
-若终端报告 `Discarding sparse depth frame`，同时看 `nonzero raw depth pixels`
-和 `PLY points`：前者也少说明 SDK 收到的深度图本身稀疏；前者正常而后者少则需排查重建、内参/深度比例。
+若终端报告“点云过少，丢弃本帧并重拍”，同时看“原始深度非零像素”
+和“PLY 有效点”：前者也少说明 SDK 收到的深度图本身稀疏；前者正常而后者少则需排查重建、内参/深度比例。
 这个检查仅防止极端坏帧进入焊缝算法，不能自动补齐局部空洞。
 
 ## IP 与序列号

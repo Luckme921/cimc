@@ -13,6 +13,19 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 
+def explain_failure(reason):
+    """Add an operator-readable cause without hiding the original diagnostic."""
+    if 'No valid normals are available after processing' in reason:
+        return (
+            '焊缝提取失败：点云处理后没有有效法线。常见原因是点数过少、'
+            '深度数据无效或局部几何退化；请先查看相机有效点数和PLY文件。'
+            f' 原始错误：{reason}')
+    if 'camera capture failed:' in reason:
+        return reason.replace(
+            'camera capture failed:', '相机采集失败，焊缝提取未启动：', 1)
+    return reason
+
+
 class WeldTaskCoordinatorNode(Node):
     def __init__(self):
         super().__init__('weld_task_coordinator_node')
@@ -59,7 +72,7 @@ class WeldTaskCoordinatorNode(Node):
         self.camera_client = self.create_client(Trigger, self.camera_service)
         self.extract_client = self.create_client(Trigger, self.extract_service)
         self._publish_armed(False)
-        self._publish_status('idle', 'waiting for ABB START_CAPTURE')
+        self._publish_status('idle', '等待ABB发送START_CAPTURE')
         self.get_logger().info(
             f'Coordinator ready: command={self.start_command}, '
             f'camera={self.camera_service}, weld_auto_process={self.auto_process}')
@@ -70,6 +83,14 @@ class WeldTaskCoordinatorNode(Node):
         msg = String()
         msg.data = json.dumps(body, ensure_ascii=False, separators=(',', ':'))
         self.status_pub.publish(msg)
+        if state == 'fault':
+            self.get_logger().error(
+                f'[任务{self._task_id}][失败] {message} 本次未发送轨迹。')
+        elif state == 'busy':
+            self.get_logger().warn(f'[任务{self._task_id}][忙碌] {message}')
+        elif state != 'idle':
+            self.get_logger().info(
+                f'[任务{self._task_id}][{state}] {message}')
 
     def _publish_armed(self, value):
         msg = Bool()
@@ -88,22 +109,21 @@ class WeldTaskCoordinatorNode(Node):
             capture_pose = self._parse_capture_pose(command)
         except ValueError as exc:
             self._publish_status('fault', str(exc))
-            self.get_logger().error(str(exc))
             return
         with self._lock:
             if self._busy:
-                self._publish_status('busy', 'duplicate START_CAPTURE ignored')
+                self._publish_status('busy', '已有任务处理中，忽略重复拍照请求')
                 return
             self._busy = True
             self._task_id += 1
         if capture_pose is not None:
             self.capture_pose_pub.publish(capture_pose)
         self._publish_armed(True)
-        self._publish_status('capturing', 'ABB capture request accepted')
+        self._publish_status('capturing', '已接收ABB拍照请求，正在采集点云')
 
         if not self.camera_client.wait_for_service(
                 timeout_sec=self.service_wait_timeout_s):
-            self._fail('camera capture service is unavailable')
+            self._fail('相机采集服务不可用，请检查相机节点是否就绪')
             return
         future = self.camera_client.call_async(Trigger.Request())
         future.add_done_callback(self._camera_done)
@@ -151,11 +171,12 @@ class WeldTaskCoordinatorNode(Node):
             reason = response.message if response else 'empty response'
             self._fail(f'camera capture failed: {reason}')
             return
-        self._publish_status('captured', 'PLY created', ply=response.message)
+        self._publish_status('captured', f'点云已保存：{response.message}',
+                             ply=response.message)
         if self.auto_process:
             # Camera node publishes /camera/pointcloud_file. weld_seam_node with
             # auto_process=true consumes it automatically, so no second call here.
-            self._publish_status('extracting', 'waiting for automatic weld extraction',
+            self._publish_status('extracting', '正在等待焊缝提取结果',
                                  ply=response.message)
             return
         if not self.extract_client.wait_for_service(
@@ -186,7 +207,7 @@ class WeldTaskCoordinatorNode(Node):
         # weld_seam_node publishes the SDK integer status: 0 means success.
         result_code = status.get('status')
         if result_code == 0:
-            self._publish_status('trajectory_ready', 'weld extraction succeeded',
+            self._publish_status('trajectory_ready', '焊缝提取成功，等待手眼转换',
                                  weld_status=status)
             # Keep the task busy and armed until the bridge confirms that it
             # consumed the matching PoseArray. This blocks overlapping jobs.
@@ -203,7 +224,7 @@ class WeldTaskCoordinatorNode(Node):
             return
         if status.get('success') is True:
             self._publish_armed(False)
-            self._publish_status('completed', 'trajectory transformed by hand-eye bridge',
+            self._publish_status('completed', '手眼转换完成，等待ABB发送结果',
                                  bridge_status=status)
             with self._lock:
                 self._busy = False
@@ -212,10 +233,9 @@ class WeldTaskCoordinatorNode(Node):
 
     def _fail(self, reason):
         self._publish_armed(False)
-        self._publish_status('fault', reason)
+        self._publish_status('fault', explain_failure(reason))
         with self._lock:
             self._busy = False
-        self.get_logger().error(reason)
 
 
 def main(args=None):
