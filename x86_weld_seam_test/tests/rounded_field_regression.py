@@ -43,11 +43,40 @@ def main():
     parser.add_argument(
         "--output-dir", type=Path,
         help="Keep offline output files here; otherwise use a temporary directory")
+    parser.add_argument(
+        "--force-rounded-full-roi", action="store_true",
+        help="Offline-only: test rounded mode and full ROI without editing the active ROS YAML")
+    parser.add_argument(
+        "--legacy-extractor", action="store_true",
+        help="Compare an older SDK that does not know the new pose-blend setting")
+    parser.add_argument(
+        "--pose-blend", type=float,
+        help="Offline-only rounded pose outer blend override")
     args = parser.parse_args()
 
     with args.yaml.open(encoding="utf-8") as stream:
         params = yaml.safe_load(stream)["weld_seam_node"]["ros__parameters"]
-    overrides = params["algorithm_overrides"]
+    overrides = list(params["algorithm_overrides"])
+    if args.force_rounded_full_roi:
+        replacements = {
+            "path.mode": "path.mode=rounded_features",
+            "roi.min_x": "roi.min_x=-inf",
+            "roi.max_x": "roi.max_x=inf",
+            "roi.min_y": "roi.min_y=-inf",
+            "roi.max_y": "roi.max_y=inf",
+        }
+        overrides = [override for override in overrides
+                     if override.split("=", 1)[0] not in replacements]
+        overrides.extend(replacements.values())
+    if args.legacy_extractor:
+        overrides = [override for override in overrides
+                     if not override.startswith("path.rounded_pose_outer_blend=")]
+    elif args.pose_blend is not None:
+        overrides = [override for override in overrides
+                     if not override.startswith("path.rounded_pose_outer_blend=") and
+                     not override.startswith("path.rounded_use_corner_pose_interpolation=")]
+        overrides.append("path.rounded_use_corner_pose_interpolation=true")
+        overrides.append(f"path.rounded_pose_outer_blend={args.pose_blend}")
     if "path.mode=rounded_features" not in overrides:
         parser.error("active ROS YAML must select path.mode=rounded_features")
     if "roi.min_x=-inf" not in overrides or "roi.max_x=inf" not in overrides:
@@ -181,6 +210,36 @@ def main():
                 # at some straight/corner transitions; keep a 35 deg guard.
                 if maximum_turn > 35.0:
                     failures.append(f"{name}: adjacent tool turn {maximum_turn:.2f} deg")
+                if args.pose_blend is not None:
+                    midpoint_count = 0
+                    for index, row in enumerate(rows):
+                        if not row["feature_type"].endswith("_midpoint"):
+                            continue
+                        if index == 0 or index + 1 >= len(rows) or not (
+                                rows[index - 1]["feature_type"].endswith(
+                                    "_rounded_corner_sample") and
+                                rows[index + 1]["feature_type"].endswith(
+                                    "_rounded_corner_sample")):
+                            continue  # Optional boundary straight, not between two corners.
+                        midpoint_count += 1
+                        def quaternion(target):
+                            value = np.array([float(target[key]) for key in (
+                                "qw", "qx", "qy", "qz")])
+                            return value / np.linalg.norm(value)
+                        left = quaternion(rows[index - 1])
+                        right = quaternion(rows[index + 1])
+                        if np.dot(left, right) < 0:
+                            right = -right
+                        expected = left + right
+                        expected /= np.linalg.norm(expected)
+                        actual = quaternion(row)
+                        error_deg = np.degrees(2 * np.arccos(np.clip(
+                            abs(np.dot(expected, actual)), -1.0, 1.0)))
+                        if error_deg > 0.05:
+                            failures.append(f"{name}: straight midpoint is not the "
+                                            f"rounded-edge pose bisector ({error_deg:.3f} deg)")
+                    if midpoint_count == 0:
+                        failures.append(f"{name}: no interior straight midpoint checked")
                 weld_rows = [row for row in rows if row["weld_enabled"] == "1"]
                 min_raw_z = min(float(row["raw_workpiece_z"]) for row in weld_rows)
                 min_target_z = min(float(row["workpiece_z"]) for row in weld_rows)

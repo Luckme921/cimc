@@ -263,6 +263,12 @@ struct AdaptiveContourParams {
     // 位于 ROI 首末边界、没有足够双侧轮廓支撑的圆角只保留中心一个实测点。
     int rounded_corner_point_count = 5;
     float rounded_corner_spacing = 2.0f;
+    // Keep the field-proven segment-slope poses unless explicitly opted in.
+    bool rounded_use_corner_pose_interpolation = false;
+    // The four non-center samples interpolate only between the proven
+    // single-corner poses. 0 keeps the corner pose; 1 reaches the adjacent
+    // corner pose at the outermost sample. The center always stays unchanged.
+    float rounded_pose_outer_blend = 0.25f;
     float rounded_measured_search_radius = 6.0f;
     // 缺口处不能把远处红点当作圆角目标。仅当缺口两侧都有轮廓支撑、
     // 且宽度不超过 max_bridge_gap 时，才允许由相邻直线切向构造补点。
@@ -369,6 +375,7 @@ struct WeldPoseData {
     TorchPoseGroup group;
     bool inherited_from_nearest_corner;
     bool default_without_corner;
+    bool interpolated_from_reference_corners;
 };
 
 struct WorkpieceOffset3f {
@@ -462,6 +469,10 @@ struct WeldFeaturePoint {
     bool is_corner_plane_fitted = false;
     bool is_modeled_gap_sample = false;
     int pose_group_override = -1;
+    int rounded_corner_index = -1;
+    int rounded_sample_offset = 0;
+    // Interior straight midpoint connects corner[index] to corner[index + 1].
+    int rounded_segment_index = -1;
 
     // applyFeaturePositionOffsets() 会保存偏置前的实际几何位置。最终 world/local
     // 继续保持历史语义供 ROS/ABB 使用；raw_* 只用于 CSV 诊断识别误差与工艺偏置。
@@ -2758,9 +2769,11 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
     const Eigen::Vector3f& n_tangent,
     const FeatureExtractionParams& feature_params,
     const AdaptiveContourParams& path_params,
-    std::string& error)
+    std::string& error,
+    std::vector<WeldFeaturePoint>& reference_corners)
 {
     std::vector<WeldFeaturePoint> result;
+    reference_corners.clear();
 
     // 先复用已经现场验证的四类角点检测、周期筛选和左右腰分类。新模式只改变
     // 每个角附近的采样数量与直线中点，不改变四类姿态坐标系的物理定义。
@@ -2775,6 +2788,7 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
     }
     std::vector<WeldFeaturePoint> corners(
         old_path.begin() + 1, old_path.end() - 1);
+    reference_corners = corners;
     if (path_params.rounded_require_complete_topology) {
         if (corners.size() <
             static_cast<size_t>(path_params.rounded_min_corner_count)) {
@@ -3085,12 +3099,13 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
             feature.is_modeled_gap_sample = modeled_gap;
             feature.is_straight_midpoint = false;
             feature.pose_group_override = -1;
+            feature.rounded_corner_index = static_cast<int>(corner_index);
+            feature.rounded_sample_offset = offset_index;
             feature.merged_detection_count = 1;
             feature.detection_score = interpolate_pose
                 ? static_cast<float>(path_params.rounded_corner_point_count) : 1.0f;
-            // 姿态仍由旧版 makeTorchPoseForCorner、固定工件 Tool X、所属四类
-            // work/lead 参数生成；内部圆角在前后共享直线斜率之间插值，
-            // 不使用单点噪声切线，从而把原来一次转角分摊成连续小转角。
+            // 保留共享斜率用于几何诊断；最终圆角姿态在后处理阶段以旧版
+            // 四类单角点姿态为锚做SLERP，中心点精确保留旧版姿态。
             if (interpolate_pose && last_offset > first_offset) {
                 const float blend = static_cast<float>(offset_index - first_offset) /
                     static_cast<float>(last_offset - first_offset);
@@ -3241,6 +3256,7 @@ static std::vector<WeldFeaturePoint> extractRoundedFeaturePath(
             feature.is_rounded_corner_sample = false;
             feature.is_straight_midpoint = true;
             feature.is_modeled_gap_sample = modeled_gap;
+            feature.rounded_segment_index = static_cast<int>(corner_index);
             feature.pose_group_override = static_cast<int>(
                 straightPoseGroup(segment, feature.protruding));
             feature.left_line_slope = measured_slope;
@@ -3671,6 +3687,7 @@ static WeldPoseData makeTorchPoseForCorner(
     pose.group = group;
     pose.inherited_from_nearest_corner = false;
     pose.default_without_corner = false;
+    pose.interpolated_from_reference_corners = false;
     return pose;
 }
 
@@ -3714,12 +3731,68 @@ static WeldPoseData makeTorchPoseWithAngleOffsets(
         feature, n_bottom, n_side, n_tangent, adjusted);
 }
 
+static WeldPoseData interpolateProvenCornerPoses(
+    const WeldPoseData& from,
+    const WeldPoseData& to,
+    float fraction,
+    TorchPoseGroup output_group,
+    bool tool_positive_z_points_from_tcp_to_body)
+{
+    fraction = std::max(0.0f, std::min(1.0f, fraction));
+    const Eigen::Quaternionf from_world(from.qw, from.qx, from.qy, from.qz);
+    const Eigen::Quaternionf to_world(to.qw, to.qx, to.qy, to.qz);
+    const Eigen::Quaternionf world_pose =
+        from_world.slerp(fraction, to_world).normalized();
+    const Eigen::Quaternionf from_workpiece(
+        from.workpiece_qw, from.workpiece_qx,
+        from.workpiece_qy, from.workpiece_qz);
+    const Eigen::Quaternionf to_workpiece(
+        to.workpiece_qw, to.workpiece_qx,
+        to.workpiece_qy, to.workpiece_qz);
+    const Eigen::Quaternionf workpiece_pose =
+        from_workpiece.slerp(fraction, to_workpiece).normalized();
+    WeldPoseData pose = from;
+    pose.qw = world_pose.w();
+    pose.qx = world_pose.x();
+    pose.qy = world_pose.y();
+    pose.qz = world_pose.z();
+    pose.workpiece_qw = workpiece_pose.w();
+    pose.workpiece_qx = workpiece_pose.x();
+    pose.workpiece_qy = workpiece_pose.y();
+    pose.workpiece_qz = workpiece_pose.z();
+    const Eigen::Vector3f tool_z = world_pose * Eigen::Vector3f::UnitZ();
+    const Eigen::Vector3f body_axis =
+        tool_positive_z_points_from_tcp_to_body ? tool_z : -tool_z;
+    const Eigen::Vector3f tool_x = world_pose * Eigen::Vector3f::UnitX();
+    pose.torch_body_axis_x = body_axis.x();
+    pose.torch_body_axis_y = body_axis.y();
+    pose.torch_body_axis_z = body_axis.z();
+    pose.tool_x_axis_x = tool_x.x();
+    pose.tool_x_axis_y = tool_x.y();
+    pose.tool_x_axis_z = tool_x.z();
+    pose.work_angle_deg =
+        (1.0f - fraction) * from.work_angle_deg +
+        fraction * to.work_angle_deg;
+    pose.lead_angle_deg =
+        (1.0f - fraction) * from.lead_angle_deg +
+        fraction * to.lead_angle_deg;
+    pose.group = output_group;
+    pose.inherited_from_nearest_corner = false;
+    pose.default_without_corner = false;
+    pose.interpolated_from_reference_corners = true;
+    return pose;
+}
+
 static std::vector<WeldPoseData> buildOrderedWeldPoses(
     const std::vector<WeldFeaturePoint>& features,
     const Eigen::Vector3f& n_bottom,
     const Eigen::Vector3f& n_side,
     const Eigen::Vector3f& n_tangent,
-    const TorchOrientationParams& params)
+    const TorchOrientationParams& params,
+    const std::vector<WeldFeaturePoint>& rounded_reference_corners,
+    bool rounded_use_corner_pose_interpolation,
+    float rounded_pose_outer_blend,
+    int rounded_corner_point_count)
 {
     std::vector<WeldPoseData> poses(features.size());
     std::vector<bool> assigned(features.size(), false);
@@ -3732,6 +3805,75 @@ static std::vector<WeldPoseData> buildOrderedWeldPoses(
             features[i], n_bottom, n_side, n_tangent, params);
         assigned[i] = true;
         corner_indices.push_back(i);
+    }
+
+    // Keep the old one-point corner poses as exact anchors. The previous
+    // five-point implementation used each adjacent straight's slope as the
+    // outer pose; that can lean farther than the field-proven corner poses.
+    // SLERP confines every rounded pose to the shortest rotation between
+    // neighboring old corner targets. An interior straight midpoint then
+    // bisects the two actual rounded edge poses bordering that segment.
+    if (rounded_use_corner_pose_interpolation &&
+        !rounded_reference_corners.empty()) {
+        std::vector<WeldPoseData> anchor_poses;
+        anchor_poses.reserve(rounded_reference_corners.size());
+        for (const WeldFeaturePoint& corner : rounded_reference_corners) {
+            anchor_poses.push_back(makeTorchPoseForCorner(
+                corner, n_bottom, n_side, n_tangent, params));
+        }
+        const int half_count = rounded_corner_point_count / 2;
+        for (size_t i = 0; i < features.size(); ++i) {
+            const WeldFeaturePoint& feature = features[i];
+            if (feature.is_rounded_corner_sample &&
+                feature.rounded_corner_index >= 0 &&
+                static_cast<size_t>(feature.rounded_corner_index) < anchor_poses.size()) {
+                const size_t index =
+                    static_cast<size_t>(feature.rounded_corner_index);
+                const int offset = feature.rounded_sample_offset;
+                size_t neighbor = index;
+                if (offset < 0 && index > 0) neighbor = index - 1;
+                if (offset > 0 && index + 1 < anchor_poses.size()) neighbor = index + 1;
+                const float blend = half_count > 0
+                    ? rounded_pose_outer_blend *
+                        static_cast<float>(std::abs(offset)) /
+                        static_cast<float>(half_count)
+                    : 0.0f;
+                poses[i] = interpolateProvenCornerPoses(
+                    anchor_poses[index], anchor_poses[neighbor], blend,
+                    poses[i].group,
+                    params.tool_positive_z_points_from_tcp_to_body);
+            }
+        }
+        // The midpoint must join the *emitted* edge poses, not the old corner
+        // centers: for a five-point arc those differ. Boundary single corners
+        // naturally use their only pose as both edges. Do this in a second
+        // pass so the result is independent of candidate insertion order.
+        std::vector<int> first_edge(anchor_poses.size(), -1);
+        std::vector<int> last_edge(anchor_poses.size(), -1);
+        for (size_t i = 0; i < features.size(); ++i) {
+            const WeldFeaturePoint& feature = features[i];
+            if (!feature.is_rounded_corner_sample ||
+                feature.rounded_corner_index < 0 ||
+                static_cast<size_t>(feature.rounded_corner_index) >= anchor_poses.size()) {
+                continue;
+            }
+            const size_t corner = static_cast<size_t>(feature.rounded_corner_index);
+            if (first_edge[corner] < 0) first_edge[corner] = static_cast<int>(i);
+            last_edge[corner] = static_cast<int>(i);
+        }
+        for (size_t i = 0; i < features.size(); ++i) {
+            const WeldFeaturePoint& feature = features[i];
+            if (!feature.is_straight_midpoint ||
+                feature.rounded_segment_index < 0) continue;
+            const size_t segment = static_cast<size_t>(feature.rounded_segment_index);
+            if (segment + 1 >= anchor_poses.size() ||
+                last_edge[segment] < 0 || first_edge[segment + 1] < 0) continue;
+            poses[i] = interpolateProvenCornerPoses(
+                poses[static_cast<size_t>(last_edge[segment])],
+                poses[static_cast<size_t>(first_edge[segment + 1])],
+                0.5f, poses[i].group,
+                params.tool_positive_z_points_from_tcp_to_body);
+        }
     }
 
     for (size_t i = 0; i < features.size(); ++i) {
@@ -3970,6 +4112,11 @@ static bool validateAdaptiveContourParams(
         params.rounded_corner_point_count % 2 == 0) {
         return fail("path.rounded_corner_point_count must be an odd number within [1, 9].");
     }
+    if (!std::isfinite(params.rounded_pose_outer_blend) ||
+        params.rounded_pose_outer_blend < 0.0f ||
+        params.rounded_pose_outer_blend > 0.5f) {
+        return fail("path.rounded_pose_outer_blend must be within [0, 0.5].");
+    }
     if (params.rounded_min_corner_count < 1 ||
         params.rounded_min_corner_count > params.max_points - 2) {
         return fail("path.rounded_min_corner_count must be within [1, max_points-2].");
@@ -4170,7 +4317,9 @@ static bool saveFeatureCsv(
                     ? "measured_arc_near_chord" : "safe_chord_fallback";
             }
         }
-        const char* pose_source = pose.default_without_corner
+        const char* pose_source = pose.interpolated_from_reference_corners
+            ? "slerp_between_old_corner_poses"
+            : pose.default_without_corner
             ? "default_no_corner"
             : (pose.inherited_from_nearest_corner
                 ? "inherited_nearest_corner"
@@ -4861,6 +5010,8 @@ static int executeWeldSeamExtraction(
     APPLY_FLOAT("path.lead_angle_deg", adaptive_params.lead_angle_deg);
     APPLY_INT("path.rounded_corner_point_count", adaptive_params.rounded_corner_point_count);
     APPLY_FLOAT("path.rounded_corner_spacing", adaptive_params.rounded_corner_spacing);
+    APPLY_BOOL("path.rounded_use_corner_pose_interpolation", adaptive_params.rounded_use_corner_pose_interpolation);
+    APPLY_FLOAT("path.rounded_pose_outer_blend", adaptive_params.rounded_pose_outer_blend);
     APPLY_FLOAT("path.rounded_measured_search_radius", adaptive_params.rounded_measured_search_radius);
     APPLY_FLOAT("path.rounded_max_measured_snap_distance", adaptive_params.rounded_max_measured_snap_distance);
     APPLY_FLOAT("path.rounded_min_gap_for_model", adaptive_params.rounded_min_gap_for_model);
@@ -5584,6 +5735,7 @@ static int executeWeldSeamExtraction(
     const std::chrono::steady_clock::time_point feature_start_time =
         std::chrono::steady_clock::now();
     std::vector<WeldFeaturePoint> feature_points;
+    std::vector<WeldFeaturePoint> rounded_reference_corners;
     std::string path_error;
     if (adaptive_params.mode == "adaptive_contour") {
         feature_points = extractAdaptiveContourPath(
@@ -5599,7 +5751,8 @@ static int executeWeldSeamExtraction(
         feature_points = extractRoundedFeaturePath(
             cloud_filtered, is_final_seam,
             N_bottom, D_bottom, N_side, D_side, N_tangent,
-            feature_params, adaptive_params, path_error);
+            feature_params, adaptive_params, path_error,
+            rounded_reference_corners);
         if (!path_error.empty()) {
             run_result.message = path_error;
             std::cerr << run_result.message << std::endl;
@@ -5628,7 +5781,20 @@ static int executeWeldSeamExtraction(
         path_torch_params.recessed_right_lead_angle_deg = adaptive_params.lead_angle_deg;
     }
     const std::vector<WeldPoseData> feature_poses = buildOrderedWeldPoses(
-        feature_points, N_bottom, N_side, N_tangent, path_torch_params);
+        feature_points, N_bottom, N_side, N_tangent, path_torch_params,
+        rounded_reference_corners,
+        adaptive_params.rounded_use_corner_pose_interpolation,
+        adaptive_params.rounded_pose_outer_blend,
+        adaptive_params.rounded_corner_point_count);
+    if (adaptive_params.mode == "rounded_features") {
+        std::cout << "Rounded pose mode: "
+            << (adaptive_params.rounded_use_corner_pose_interpolation
+                ? "EXPERIMENTAL neighboring old-corner SLERP, outer_blend="
+                : "field-proven shared-segment slope, outer_blend ignored=")
+            << adaptive_params.rounded_pose_outer_blend
+            << "; tool-frame reference unchanged; ABB IK not verified"
+            << std::endl;
+    }
 
     // 提取、排序、凹凸分类和姿态生成完成后，才按点类型施加工件坐标偏置。
     // 因此不完整周期、视野截断和某一类角点缺失都不会影响其余点的偏置选择。
@@ -5860,7 +6026,9 @@ static int executeWeldSeamExtraction(
         std::cout << " : " << feature.world.x() << ", "
             << feature.world.y() << ", " << feature.world.z()
             << " / local_z_to_bottom=" << feature.local.z() << " mm" << std::endl;
-        const char* pose_source = pose.default_without_corner
+        const char* pose_source = pose.interpolated_from_reference_corners
+            ? "slerp_between_old_corner_poses"
+            : pose.default_without_corner
             ? "default_no_corner"
             : (pose.inherited_from_nearest_corner
                 ? "inherited_nearest_corner"
@@ -6002,7 +6170,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.8";
+    return "2.4.9";
 }
 
 std::string weld_seam_sdk::commandLineHelp()
