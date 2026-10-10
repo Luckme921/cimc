@@ -263,6 +263,9 @@ struct AdaptiveContourParams {
     // 位于 ROI 首末边界、没有足够双侧轮廓支撑的圆角只保留中心一个实测点。
     int rounded_corner_point_count = 5;
     float rounded_corner_spacing = 2.0f;
+    // legacy: retain current rounded orientations; old_corner_constant:
+    // every sample of a corner copies its proven one-point corner pose.
+    std::string rounded_pose_strategy = "legacy";
     // Keep the field-proven segment-slope poses unless explicitly opted in.
     bool rounded_use_corner_pose_interpolation = false;
     // The four non-center samples interpolate only between the proven
@@ -376,6 +379,7 @@ struct WeldPoseData {
     bool inherited_from_nearest_corner;
     bool default_without_corner;
     bool interpolated_from_reference_corners;
+    bool copied_from_reference_corner;
 };
 
 struct WorkpieceOffset3f {
@@ -3688,6 +3692,7 @@ static WeldPoseData makeTorchPoseForCorner(
     pose.inherited_from_nearest_corner = false;
     pose.default_without_corner = false;
     pose.interpolated_from_reference_corners = false;
+    pose.copied_from_reference_corner = false;
     return pose;
 }
 
@@ -3780,6 +3785,7 @@ static WeldPoseData interpolateProvenCornerPoses(
     pose.inherited_from_nearest_corner = false;
     pose.default_without_corner = false;
     pose.interpolated_from_reference_corners = true;
+    pose.copied_from_reference_corner = false;
     return pose;
 }
 
@@ -3790,6 +3796,7 @@ static std::vector<WeldPoseData> buildOrderedWeldPoses(
     const Eigen::Vector3f& n_tangent,
     const TorchOrientationParams& params,
     const std::vector<WeldFeaturePoint>& rounded_reference_corners,
+    const std::string& rounded_pose_strategy,
     bool rounded_use_corner_pose_interpolation,
     float rounded_pose_outer_blend,
     int rounded_corner_point_count)
@@ -3813,7 +3820,40 @@ static std::vector<WeldPoseData> buildOrderedWeldPoses(
     // SLERP confines every rounded pose to the shortest rotation between
     // neighboring old corner targets. An interior straight midpoint then
     // bisects the two actual rounded edge poses bordering that segment.
-    if (rounded_use_corner_pose_interpolation &&
+    if (rounded_pose_strategy == "old_corner_constant" &&
+        !rounded_reference_corners.empty()) {
+        std::vector<WeldPoseData> anchor_poses;
+        anchor_poses.reserve(rounded_reference_corners.size());
+        for (const WeldFeaturePoint& corner : rounded_reference_corners) {
+            anchor_poses.push_back(makeTorchPoseForCorner(
+                corner, n_bottom, n_side, n_tangent, params));
+        }
+        for (size_t i = 0; i < features.size(); ++i) {
+            const WeldFeaturePoint& feature = features[i];
+            if (feature.is_rounded_corner_sample &&
+                feature.rounded_corner_index >= 0 &&
+                static_cast<size_t>(feature.rounded_corner_index) < anchor_poses.size()) {
+                // A rounded group is a translation-only run. Keep the old
+                // one-point tool frame, including its X-axis convention.
+                poses[i] = anchor_poses[static_cast<size_t>(feature.rounded_corner_index)];
+                poses[i].copied_from_reference_corner = true;
+            } else if (feature.is_straight_midpoint &&
+                       feature.rounded_segment_index >= 0) {
+                const size_t segment =
+                    static_cast<size_t>(feature.rounded_segment_index);
+                if (segment + 1 >= anchor_poses.size()) continue;
+                if (poses[i].group != TORCH_STRAIGHT_LEFT_WAIST &&
+                    poses[i].group != TORCH_STRAIGHT_RIGHT_WAIST) {
+                    // Horizontal midpoint keeps its existing configured pose.
+                    continue;
+                }
+                poses[i] = interpolateProvenCornerPoses(
+                    anchor_poses[segment], anchor_poses[segment + 1],
+                    0.5f, poses[i].group,
+                    params.tool_positive_z_points_from_tcp_to_body);
+            }
+        }
+    } else if (rounded_use_corner_pose_interpolation &&
         !rounded_reference_corners.empty()) {
         std::vector<WeldPoseData> anchor_poses;
         anchor_poses.reserve(rounded_reference_corners.size());
@@ -4117,6 +4157,14 @@ static bool validateAdaptiveContourParams(
         params.rounded_pose_outer_blend > 0.5f) {
         return fail("path.rounded_pose_outer_blend must be within [0, 0.5].");
     }
+    if (params.rounded_pose_strategy != "legacy" &&
+        params.rounded_pose_strategy != "old_corner_constant") {
+        return fail("path.rounded_pose_strategy must be legacy or old_corner_constant.");
+    }
+    if (params.rounded_pose_strategy != "legacy" &&
+        params.rounded_use_corner_pose_interpolation) {
+        return fail("path.rounded_pose_strategy and path.rounded_use_corner_pose_interpolation cannot both select experimental modes.");
+    }
     if (params.rounded_min_corner_count < 1 ||
         params.rounded_min_corner_count > params.max_points - 2) {
         return fail("path.rounded_min_corner_count must be within [1, max_points-2].");
@@ -4235,6 +4283,23 @@ static float quaternionAngularDistanceDeg(
         static_cast<float>(180.0 / 3.14159265358979323846);
 }
 
+static const char* poseSourceName(
+    const WeldPoseData& pose,
+    const WeldFeaturePoint& feature)
+{
+    if (pose.inherited_from_nearest_corner) return "inherited_nearest_corner";
+    if (pose.copied_from_reference_corner) return "copied_old_corner_pose";
+    if (pose.interpolated_from_reference_corners)
+        return "slerp_between_old_corner_poses";
+    if (pose.default_without_corner) return "default_no_corner";
+    if (feature.is_contour_sample) return "local_contour_tangent";
+    if (feature.is_straight_midpoint || feature.is_boundary_seam_endpoint)
+        return "straight_geometry_same_tool_frame";
+    if (feature.is_rounded_corner_sample)
+        return "inherited_four_type_corner_geometry";
+    return "corner_geometry";
+}
+
 static bool saveFeatureCsv(
     const std::string& filename,
     const std::vector<WeldFeaturePoint>& features,
@@ -4317,19 +4382,7 @@ static bool saveFeatureCsv(
                     ? "measured_arc_near_chord" : "safe_chord_fallback";
             }
         }
-        const char* pose_source = pose.interpolated_from_reference_corners
-            ? "slerp_between_old_corner_poses"
-            : pose.default_without_corner
-            ? "default_no_corner"
-            : (pose.inherited_from_nearest_corner
-                ? "inherited_nearest_corner"
-                : (feature.is_contour_sample
-                    ? "local_contour_tangent"
-                    : (feature.is_straight_midpoint || feature.is_boundary_seam_endpoint
-                        ? "straight_geometry_same_tool_frame"
-                        : (feature.is_rounded_corner_sample
-                            ? "inherited_four_type_corner_geometry"
-                            : "corner_geometry"))));
+        const char* pose_source = poseSourceName(pose, feature);
         const float orientation_delta = i == 0
             ? 0.0f : quaternionAngularDistanceDeg(poses[i - 1], pose);
         output << i << ','
@@ -5010,6 +5063,7 @@ static int executeWeldSeamExtraction(
     APPLY_FLOAT("path.lead_angle_deg", adaptive_params.lead_angle_deg);
     APPLY_INT("path.rounded_corner_point_count", adaptive_params.rounded_corner_point_count);
     APPLY_FLOAT("path.rounded_corner_spacing", adaptive_params.rounded_corner_spacing);
+    APPLY_STRING("path.rounded_pose_strategy", adaptive_params.rounded_pose_strategy);
     APPLY_BOOL("path.rounded_use_corner_pose_interpolation", adaptive_params.rounded_use_corner_pose_interpolation);
     APPLY_FLOAT("path.rounded_pose_outer_blend", adaptive_params.rounded_pose_outer_blend);
     APPLY_FLOAT("path.rounded_measured_search_radius", adaptive_params.rounded_measured_search_radius);
@@ -5783,14 +5837,17 @@ static int executeWeldSeamExtraction(
     const std::vector<WeldPoseData> feature_poses = buildOrderedWeldPoses(
         feature_points, N_bottom, N_side, N_tangent, path_torch_params,
         rounded_reference_corners,
+        adaptive_params.rounded_pose_strategy,
         adaptive_params.rounded_use_corner_pose_interpolation,
         adaptive_params.rounded_pose_outer_blend,
         adaptive_params.rounded_corner_point_count);
     if (adaptive_params.mode == "rounded_features") {
         std::cout << "Rounded pose mode: "
-            << (adaptive_params.rounded_use_corner_pose_interpolation
-                ? "EXPERIMENTAL neighboring old-corner SLERP, outer_blend="
-                : "field-proven shared-segment slope, outer_blend ignored=")
+            << (adaptive_params.rounded_pose_strategy == "old_corner_constant"
+                ? "EXPERIMENTAL old-corner constant groups; diagonal midpoints bisect old corner poses, flat midpoints unchanged; outer_blend ignored="
+                : (adaptive_params.rounded_use_corner_pose_interpolation
+                    ? "EXPERIMENTAL neighboring old-corner SLERP, outer_blend="
+                    : "field-proven shared-segment slope, outer_blend ignored="))
             << adaptive_params.rounded_pose_outer_blend
             << "; tool-frame reference unchanged; ABB IK not verified"
             << std::endl;
@@ -6026,19 +6083,7 @@ static int executeWeldSeamExtraction(
         std::cout << " : " << feature.world.x() << ", "
             << feature.world.y() << ", " << feature.world.z()
             << " / local_z_to_bottom=" << feature.local.z() << " mm" << std::endl;
-        const char* pose_source = pose.interpolated_from_reference_corners
-            ? "slerp_between_old_corner_poses"
-            : pose.default_without_corner
-            ? "default_no_corner"
-            : (pose.inherited_from_nearest_corner
-                ? "inherited_nearest_corner"
-                : (feature.is_contour_sample
-                    ? "local_contour_tangent"
-                    : (feature.is_straight_midpoint || feature.is_boundary_seam_endpoint
-                        ? "straight_geometry_same_tool_frame"
-                        : (feature.is_rounded_corner_sample
-                            ? "inherited_four_type_corner_geometry"
-                            : "corner_geometry"))));
+        const char* pose_source = poseSourceName(pose, feature);
         const float orientation_delta = i == 0
             ? 0.0f : quaternionAngularDistanceDeg(feature_poses[i - 1], pose);
         maximum_orientation_step_deg = std::max(
@@ -6170,7 +6215,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.9";
+    return "2.4.10";
 }
 
 std::string weld_seam_sdk::commandLineHelp()

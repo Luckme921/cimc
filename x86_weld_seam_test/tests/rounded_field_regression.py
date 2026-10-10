@@ -52,6 +52,9 @@ def main():
     parser.add_argument(
         "--pose-blend", type=float,
         help="Offline-only rounded pose outer blend override")
+    parser.add_argument(
+        "--pose-strategy", choices=("legacy", "old_corner_constant"),
+        help="Offline-only rounded pose strategy override")
     args = parser.parse_args()
 
     with args.yaml.open(encoding="utf-8") as stream:
@@ -77,6 +80,12 @@ def main():
                      not override.startswith("path.rounded_use_corner_pose_interpolation=")]
         overrides.append("path.rounded_use_corner_pose_interpolation=true")
         overrides.append(f"path.rounded_pose_outer_blend={args.pose_blend}")
+    if args.pose_strategy is not None:
+        overrides = [override for override in overrides
+                     if not override.startswith("path.rounded_pose_strategy=") and
+                     not override.startswith("path.rounded_use_corner_pose_interpolation=")]
+        overrides.append(f"path.rounded_pose_strategy={args.pose_strategy}")
+        overrides.append("path.rounded_use_corner_pose_interpolation=false")
     if "path.mode=rounded_features" not in overrides:
         parser.error("active ROS YAML must select path.mode=rounded_features")
     if "roi.min_x=-inf" not in overrides or "roi.max_x=inf" not in overrides:
@@ -176,6 +185,10 @@ def main():
                                         float(previous["raw_workpiece_y"])) < -0.1:
                             failures.append(f"{name}: a rounded corner reverses Y")
                             break
+                    if args.pose_strategy == "old_corner_constant":
+                        # Parallel torch axes in a translation-only corner
+                        # cannot have a unique common intersection point.
+                        continue
                     # The existing tool-frame convention should keep the five
                     # torch-axis lines roughly concurrent at a rounded corner.
                     matrix = np.zeros((3, 3))
@@ -200,7 +213,8 @@ def main():
                         for position, axis in zip(positions, axes))
                     # A modeled or quantized seam point can miss the shared
                     # theoretical axis center slightly; >3 mm is suspect.
-                    if maximum_axis_miss > 3.0:
+                    if args.pose_strategy != "old_corner_constant" and \
+                            maximum_axis_miss > 3.0:
                         failures.append(f"{name}: corner tool axes miss their "
                                         f"common center by {maximum_axis_miss:.2f} mm")
                 maximum_turn = max(
@@ -210,7 +224,8 @@ def main():
                 # at some straight/corner transitions; keep a 35 deg guard.
                 if maximum_turn > 35.0:
                     failures.append(f"{name}: adjacent tool turn {maximum_turn:.2f} deg")
-                if args.pose_blend is not None:
+                if args.pose_blend is not None or \
+                        args.pose_strategy == "old_corner_constant":
                     midpoint_count = 0
                     for index, row in enumerate(rows):
                         if not row["feature_type"].endswith("_midpoint"):
@@ -221,6 +236,9 @@ def main():
                                 rows[index + 1]["feature_type"].endswith(
                                     "_rounded_corner_sample")):
                             continue  # Optional boundary straight, not between two corners.
+                        if args.pose_strategy == "old_corner_constant" and \
+                                "waist" not in row["feature_type"]:
+                            continue  # Horizontal midpoint keeps its own pose.
                         midpoint_count += 1
                         def quaternion(target):
                             value = np.array([float(target[key]) for key in (
@@ -240,6 +258,45 @@ def main():
                                             f"rounded-edge pose bisector ({error_deg:.3f} deg)")
                     if midpoint_count == 0:
                         failures.append(f"{name}: no interior straight midpoint checked")
+                if args.pose_strategy == "old_corner_constant":
+                    for group in rounded_groups:
+                        center = group[len(group) // 2]
+                        for sample in group:
+                            if not np.allclose(
+                                    [float(sample[key]) for key in
+                                     ("qw", "qx", "qy", "qz")],
+                                    [float(center[key]) for key in
+                                     ("qw", "qx", "qy", "qz")], atol=2e-5):
+                                failures.append(f"{name}: rounded group rotates instead "
+                                                "of retaining its one-point pose")
+                                break
+                    legacy_prefix = name + "_pose_legacy_compare"
+                    legacy_command = [str(args.extractor), str(input_ply),
+                                      str(output_dir), legacy_prefix]
+                    for override in overrides:
+                        if override.startswith("path.rounded_pose_strategy="):
+                            override = "path.rounded_pose_strategy=legacy"
+                        legacy_command.extend(("--set", override))
+                    legacy = subprocess.run(
+                        legacy_command, capture_output=True, text=True, check=False)
+                    legacy_csv = output_dir / (legacy_prefix + "_features.csv")
+                    if legacy.returncode != 0 or not legacy_csv.is_file():
+                        failures.append(f"{name}: legacy comparison failed")
+                    else:
+                        with legacy_csv.open(newline="", encoding="utf-8") as stream:
+                            legacy_rows = list(csv.DictReader(stream))
+                        if len(legacy_rows) != len(rows):
+                            failures.append(f"{name}: pose strategy changed path point count")
+                        else:
+                            for current, previous in zip(rows, legacy_rows):
+                                if current["feature_type"].endswith("_midpoint") and \
+                                        "waist" not in current["feature_type"]:
+                                    if any(abs(float(current[key]) -
+                                               float(previous[key])) > 2e-5
+                                           for key in ("qw", "qx", "qy", "qz")):
+                                        failures.append(
+                                            f"{name}: flat midpoint pose changed")
+                                        break
                 weld_rows = [row for row in rows if row["weld_enabled"] == "1"]
                 min_raw_z = min(float(row["raw_workpiece_z"]) for row in weld_rows)
                 min_target_z = min(float(row["workpiece_z"]) for row in weld_rows)
