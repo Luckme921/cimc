@@ -77,6 +77,9 @@ weld_seam_node:
       # 改为 feature_points 可回到旧四类单拐点模式；改为 adaptive_contour
       # 可使用连续轮廓自适应采样。只修改等号右侧，不要同时写多条 path.mode。
       - "path.mode=rounded_features"
+      # SDK 2.4.10：同一圆角5点沿用旧版单角点姿态；斜边中点在两旧角点
+      # 姿态之间过渡，水平边中点保留原姿态。ABB可达性仍需现场验证。
+      - "path.rounded_pose_strategy=old_corner_constant"
 
       # ==================== ROI（相机/PLY 坐标系，mm） ====================
       # ROI 是相机/PLY坐标系下的轴对齐长方体，不是工件局部坐标系或 robot_base。
