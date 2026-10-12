@@ -151,6 +151,116 @@ static bool refinePlaneOnFullResolutionCloud(
     return std::isfinite(d);
 }
 
+// Experimental correction for a gently warped L-plate bottom. The global
+// plane still defines the workpiece frame; this profile only changes the
+// primary seam-candidate height gate. Selected downstream targets can change.
+struct LocalBottomHeightProfile {
+    float bin_width = 0.0f;
+    std::vector<float> centers;
+    std::vector<float> heights;
+
+    float correction(float x) const
+    {
+        if (centers.empty()) return 0.0f;
+        const auto next = std::lower_bound(centers.begin(), centers.end(), x);
+        if (next == centers.begin()) {
+            const float weight = std::max(0.0f,
+                1.0f - std::abs(x - centers.front()) / bin_width);
+            return weight * heights.front();
+        }
+        if (next == centers.end()) {
+            const float weight = std::max(0.0f,
+                1.0f - std::abs(x - centers.back()) / bin_width);
+            return weight * heights.back();
+        }
+        const size_t right = static_cast<size_t>(next - centers.begin());
+        const size_t left = right - 1;
+        const float gap = centers[right] - centers[left];
+        if (gap > 2.5f * bin_width) {
+            const float left_weight = std::max(0.0f,
+                1.0f - (x - centers[left]) / bin_width);
+            const float right_weight = std::max(0.0f,
+                1.0f - (centers[right] - x) / bin_width);
+            return left_weight * heights[left] + right_weight * heights[right];
+        }
+        const float ratio = (x - centers[left]) / gap;
+        return heights[left] + ratio * (heights[right] - heights[left]);
+    }
+};
+
+static LocalBottomHeightProfile estimateLocalBottomHeight(
+    const pcl::PointCloud<PointInT>::ConstPtr& cloud,
+    const Eigen::Vector3f& n_bottom, float d_bottom,
+    const Eigen::Vector3f& n_side, float d_side,
+    const Eigen::Vector3f& n_tangent, float y_min,
+    float bin_width, float support_band, float normal_dot_min,
+    int min_bin_points, float max_abs_correction, float max_bin_mad)
+{
+    LocalBottomHeightProfile profile;
+    if (!cloud || cloud->empty()) return profile;
+    float min_x = std::numeric_limits<float>::infinity();
+    float max_x = -std::numeric_limits<float>::infinity();
+    for (const PointInT& point : cloud->points) {
+        const Eigen::Vector3f xyz(point.x, point.y, point.z);
+        if (!xyz.allFinite()) continue;
+        const float x = n_tangent.dot(xyz);
+        min_x = std::min(min_x, x);
+        max_x = std::max(max_x, x);
+    }
+    if (!std::isfinite(min_x) || !std::isfinite(max_x)) return profile;
+    const int bin_count = static_cast<int>(std::floor((max_x - min_x) / bin_width)) + 1;
+    if (bin_count < 3 || bin_count > 10000) return profile;
+    std::vector<std::vector<float>> bins(static_cast<size_t>(bin_count));
+    for (const PointInT& point : cloud->points) {
+        const Eigen::Vector3f xyz(point.x, point.y, point.z);
+        const Eigen::Vector3f normal(point.normal_x, point.normal_y, point.normal_z);
+        if (!xyz.allFinite() || !normal.allFinite() ||
+            normal.squaredNorm() < 1e-8f) continue;
+        const float z = n_bottom.dot(xyz) + d_bottom;
+        if (std::abs(z) > support_band ||
+            n_side.dot(xyz) + d_side <= y_min ||
+            std::abs(n_bottom.dot(normal)) <
+                normal_dot_min * normal.norm()) continue;
+        const int index = std::min(bin_count - 1, std::max(0,
+            static_cast<int>(std::floor((n_tangent.dot(xyz) - min_x) / bin_width))));
+        bins[static_cast<size_t>(index)].push_back(z);
+    }
+    for (int i = 0; i < bin_count; ++i) {
+        std::vector<float>& values = bins[static_cast<size_t>(i)];
+        if (static_cast<int>(values.size()) < min_bin_points) continue;
+        const size_t mid = values.size() / 2;
+        std::nth_element(values.begin(), values.begin() + mid, values.end());
+        const float median = values[mid];
+        if (std::abs(median) > max_abs_correction) continue;
+        for (float& value : values) value = std::abs(value - median);
+        std::nth_element(values.begin(), values.begin() + mid, values.end());
+        if (values[mid] > max_bin_mad) continue;
+        profile.centers.push_back(min_x + (static_cast<float>(i) + 0.5f) * bin_width);
+        profile.heights.push_back(median);
+    }
+    // Sparse support cannot distinguish a real bottom from a few unrelated
+    // horizontal patches. Fall back to the original global plane in that case.
+    if (profile.centers.size() < 3 ||
+        profile.centers.size() * 2 < static_cast<size_t>(bin_count)) {
+        profile.centers.clear();
+        profile.heights.clear();
+    } else {
+        profile.bin_width = bin_width;
+    }
+    std::cout << "Experimental local bottom: " << profile.centers.size()
+        << "/" << bin_count << " supported bins";
+    if (!profile.heights.empty()) {
+        const auto range = std::minmax_element(
+            profile.heights.begin(), profile.heights.end());
+        std::cout << ", correction=[" << *range.first << ", "
+            << *range.second << "] mm";
+    } else {
+        std::cout << "; insufficient support, using global plane";
+    }
+    std::cout << std::endl;
+    return profile;
+}
+
 // ============================================================================
 // 二次提取：从已经确认的红色焊缝点中提取有序折线角点。
 // 这里不参与、也不改变上游焊缝提取，只消费 is_final_seam 的结果。
@@ -4924,6 +5034,15 @@ static int executeWeldSeamExtraction(
     float seam_cluster_tolerance = 3.5f;
     int seam_cluster_min_size = 30;
     int seam_cluster_max_size = 500000;
+    // 离线实验：用底面法向一致的局部点修正红线候选高度带。默认关闭，
+    // 不直接平移点或改姿态公式，但改变候选红点可间接改变目标位姿。
+    bool local_bottom_enable = false;
+    float local_bottom_bin_width = 20.0f;
+    float local_bottom_support_band = 3.0f;
+    float local_bottom_normal_dot_min = 0.90f;
+    int local_bottom_min_bin_points = 100;
+    float local_bottom_max_abs_correction = 3.0f;
+    float local_bottom_max_bin_mad = 1.0f;
 
     // 7. 焊缝二次拐点提取参数。L 侧板方向为物理凸出正方向，因而靠近
     // y_local=0 的较小 y 层属于凸角。凹角内部用两侧各 5mm 构造安全弦，
@@ -5017,6 +5136,13 @@ static int executeWeldSeamExtraction(
     APPLY_FLOAT("primary.seam_cluster_tolerance", seam_cluster_tolerance);
     APPLY_INT("primary.seam_cluster_min_size", seam_cluster_min_size);
     APPLY_INT("primary.seam_cluster_max_size", seam_cluster_max_size);
+    APPLY_BOOL("primary.local_bottom.enable", local_bottom_enable);
+    APPLY_FLOAT("primary.local_bottom.bin_width", local_bottom_bin_width);
+    APPLY_FLOAT("primary.local_bottom.support_band", local_bottom_support_band);
+    APPLY_FLOAT("primary.local_bottom.normal_dot_min", local_bottom_normal_dot_min);
+    APPLY_INT("primary.local_bottom.min_bin_points", local_bottom_min_bin_points);
+    APPLY_FLOAT("primary.local_bottom.max_abs_correction", local_bottom_max_abs_correction);
+    APPLY_FLOAT("primary.local_bottom.max_bin_mad", local_bottom_max_bin_mad);
 
     APPLY_FLOAT("feature.profile_bin_width", feature_params.profile_bin_width);
     APPLY_FLOAT("feature.flat_normal_dot_min", feature_params.flat_normal_dot_min);
@@ -5213,6 +5339,18 @@ static int executeWeldSeamExtraction(
         seam_cluster_max_size < seam_cluster_min_size) {
         run_result.message =
             "Invalid primary seam band/cluster parameters.";
+        std::cerr << run_result.message << std::endl;
+        return -1;
+    }
+    if (!std::isfinite(local_bottom_bin_width) || local_bottom_bin_width <= 0.0f ||
+        !std::isfinite(local_bottom_support_band) || local_bottom_support_band <= 0.0f ||
+        !std::isfinite(local_bottom_normal_dot_min) ||
+        local_bottom_normal_dot_min <= 0.0f || local_bottom_normal_dot_min > 1.0f ||
+        local_bottom_min_bin_points < 3 ||
+        !std::isfinite(local_bottom_max_abs_correction) ||
+        local_bottom_max_abs_correction <= 0.0f ||
+        !std::isfinite(local_bottom_max_bin_mad) || local_bottom_max_bin_mad <= 0.0f) {
+        run_result.message = "Invalid primary.local_bottom parameters.";
         std::cerr << run_result.message << std::endl;
         return -1;
     }
@@ -5702,6 +5840,16 @@ static int executeWeldSeamExtraction(
     // 同一批点云发生刚体旋转或平移时，该相对坐标保持不变；改变 ROI 会改变此 X 原点。
     const float workpiece_x_origin_projection = N_tangent.dot(C_all);
 
+    LocalBottomHeightProfile local_bottom;
+    if (local_bottom_enable) {
+        local_bottom = estimateLocalBottomHeight(
+            cloud_filtered, N_bottom, D_bottom, N_side, D_side, N_tangent,
+            y_filter_threshold, local_bottom_bin_width,
+            local_bottom_support_band, local_bottom_normal_dot_min,
+            local_bottom_min_bin_points, local_bottom_max_abs_correction,
+            local_bottom_max_bin_mad);
+    }
+
     // 5. 提取候选点，并执行【二维联合滤波】
     pcl::PointCloud<PointInT>::Ptr seam_candidates(new pcl::PointCloud<PointInT>);
     std::vector<int> seam_original_idx; 
@@ -5718,6 +5866,10 @@ static int executeWeldSeamExtraction(
         // z_local > 0 表示在底板上方； y_local > 0 表示在 L侧板内侧
         float z_local = pt.x * N_bottom.x() + pt.y * N_bottom.y() + pt.z * N_bottom.z() + D_bottom;
         float y_local = pt.x * N_side.x()   + pt.y * N_side.y()   + pt.z * N_side.z()   + D_side;
+        if (local_bottom_enable) {
+            const Eigen::Vector3f world(pt.x, pt.y, pt.z);
+            z_local -= local_bottom.correction(N_tangent.dot(world));
+        }
         
         Eigen::Vector3f pt_n(pt.normal_x, pt.normal_y, pt.normal_z);
         if (!pt_n.allFinite() || pt_n.squaredNorm() < 1e-8f) continue;
@@ -6215,7 +6367,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.10";
+    return "2.4.11";
 }
 
 std::string weld_seam_sdk::commandLineHelp()

@@ -1,4 +1,4 @@
-# x86 焊缝提取算法与 SDK 2.4.9（工作区离线候选）
+# x86 焊缝提取算法与 SDK 2.4.11（局部底面离线实验）
 
 本目录是 Ubuntu 22.04 x86_64 上的独立算法工程。它同时生成：
 
@@ -18,7 +18,18 @@
 
 2.4.9 在工作区增加**默认关闭的离线候选姿态**：`path.rounded_use_corner_pose_interpolation=true` 时，五点圆角中心精确使用旧版单角点姿态，其余四点在中心与前/后旧版角点姿态之间做最短旋转插值；`path.rounded_pose_outer_blend` 控制最外侧点朝相邻角点转动的比例（0–0.5，默认 0.25）。两个圆角之间的直线中点姿态取相邻圆角靠直线侧的两个实际输出端点姿态的球面中点；因此实验模式下中点的独立 `orientation.straight_*` 工艺角不再决定其姿态，但各组位置偏移仍有效。位置、四类中心姿态及旧版 `feature_points` 不变。该方案在历史点云上减轻了圆角外侧过倾斜，但部分圆角的焊枪轴线交汇偏差从旧版测试要求的 3 mm 增至约 5.5 mm，尚未通过该项严格回归，也没有 ABB 关节可达性验证。因此**未安装到现场 SDK，ROS launch 仍使用原已安装版本**；禁止将此试验开关直接用于自动焊接。
 
-2.4.10 另有 `path.rounded_pose_strategy=old_corner_constant` 离线候选：每组完整圆角的 5 个点（或边界单点）全部复制该角在旧版 `feature_points` 下的姿态，仅改变 TCP 位置；斜边中点为相邻旧角点姿态的球面中点，水平边中点保留现有独立姿态。此策略应与 `path.rounded_use_corner_pose_interpolation=false` 一起使用；默认仍为 `legacy`。同组焊枪轴线平行，不适用“圆弧 5 条轴线交汇于一点”的旧测试；这不是 ABB 逆解、关节限位或碰撞已通过的证明。现场 SDK 未更新前，ROS YAML 加入该参数也不会激活此候选。
+2.4.10 另有 `path.rounded_pose_strategy=old_corner_constant`：每组完整圆角的 5 个点（或边界单点）全部复制该角在旧版 `feature_points` 下的姿态，仅改变 TCP 位置；斜边中点为相邻旧角点姿态的球面中点，水平边中点保留现有独立姿态。此策略应与 `path.rounded_use_corner_pose_interpolation=false` 一起使用；默认仍为 `legacy`。同组焊枪轴线平行，不适用“圆弧 5 条轴线交汇于一点”的旧测试；这不是 ABB 逆解、关节限位或碰撞已通过的证明。工作区 ROS 已安装并使用 2.4.10，姿态策略由 ROS YAML 显式启用。
+
+2.4.11 增加**默认关闭、仅供离线比较**的 `primary.local_bottom.enable`：从靠近全局底面且法向与底面一致的点，按工件 X 分箱取稳健高度，再线性插值修正红色焊缝候选点的高度门限。低支撑、异常分箱和远离支撑的区域退回原全局底面；工件坐标系和姿态公式均未更改，但候选红点变化仍可能改变最终目标位姿。该版本只在 `build/` 编译，**未安装到 ROS/ABB 链路**。十组历史 PLY 中局部底面偏差约在 -0.89～+0.37 mm，但个别角点目标随红点筛选变化超过 6 mm，不能据此认定精度提升或现场可用。先查看 `output/local_bottom_experiment_20261012/` 中两版结果，再决定是否继续研发。
+
+离线重跑比较（不连接相机、ROS 或 ABB）：
+
+```bash
+cd /home/mini/x86_ros2_ws
+python3 x86_weld_seam_test/tests/local_bottom_experiment.py
+```
+
+报告是 `comparison.csv`；每组的 `*_global_result.ply` 与 `*_local_result.ply` 分别为原门限和实验门限。此脚本读取当前 ROS YAML 参数，但强制关闭 ROI，因为历史 PLY 来自不同拍照位；它不会修改 ROS YAML。
 
 ## 1. 文件说明
 
