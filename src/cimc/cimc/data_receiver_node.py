@@ -170,6 +170,10 @@ class DataReceiverNode(Node):
             'abb_max_line_bytes', 4096).value)
         self.abb_capture_command = self.declare_parameter(
             'abb_capture_command', 'START_CAPTURE').value.strip()
+        # Manual operator setup may keep TCP connected before perception starts.
+        self.hold_capture_until_coordinator_ready = bool(self.declare_parameter(
+            'hold_capture_until_coordinator_ready', False).value)
+        self.coordinator_ready = not self.hold_capture_until_coordinator_ready
 
         # 2. TCP 异步可靠转发配置 (发给第三方设备)
         self.third_party_link_enabled = bool(self.declare_parameter(
@@ -245,8 +249,15 @@ class DataReceiverNode(Node):
             String, '/abb/task_timing', 10)
         self.abb_tx_sub = self.create_subscription(
             String, '/abb/tx_text', self.abb_tx_callback, 10)
+        # The coordinator publishes its initial idle only once. Transient-local
+        # durability prevents manual-mode readiness from being lost in discovery.
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        task_status_qos = QoSProfile(depth=1)
+        task_status_qos.reliability = ReliabilityPolicy.RELIABLE
+        task_status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.weld_task_status_sub = self.create_subscription(
-            String, '/weld_task/status', self.weld_task_status_callback, 10)
+            String, '/weld_task/status', self.weld_task_status_callback,
+            task_status_qos)
         self.weld_control_pub = self.create_publisher(
             String, self.weld_control_topic, 10)
         self.weld_parameter_pub = self.create_publisher(
@@ -496,6 +507,12 @@ class DataReceiverNode(Node):
         except json.JSONDecodeError:
             return
         state = status.get('state')
+        if state == 'idle':
+            if not self.coordinator_ready:
+                self.get_logger().info(
+                    '人工确认完成，任务协调节点已就绪；请确认相机 Camera ready '
+                    '和 Hand-eye bridge ready 后再由 ABB 发送拍照指令')
+            self.coordinator_ready = True
         if state == 'capturing':
             self.abb_task_timer.set_task_id(status.get('task_id'))
         elif state == 'fault':
@@ -604,6 +621,17 @@ class DataReceiverNode(Node):
             return
 
         commands = [line.strip() for line in clean_text.split('\n')]
+        capture_commands = [line for line in commands if (
+            line == self.abb_capture_command or
+            line.startswith(self.abb_capture_command + ':'))]
+        if capture_commands and not self.coordinator_ready:
+            self.get_logger().warn(
+                '人工标定尚未确认或处理链路未就绪；本次 ABB 拍照请求已拒绝，'
+                '请在就绪提示后重新发送，不会缓存旧的机器人位姿')
+            self.abb_tx_callback(String(data='TRAJECTORY_ERROR:OPERATOR_NOT_READY\r\n'))
+            commands = [line for line in commands if line not in capture_commands]
+            if not commands:
+                return
         if any(
                 line == self.abb_capture_command or
                 line.startswith(self.abb_capture_command + ':')

@@ -56,7 +56,7 @@ class WeldTaskCoordinatorNode(Node):
         transient.reliability = ReliabilityPolicy.RELIABLE
         transient.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.status_pub = self.create_publisher(
-            String, '/weld_task/status', QoSProfile(depth=10))
+            String, '/weld_task/status', transient)
         self.armed_pub = self.create_publisher(
             Bool, '/weld_task/trajectory_armed', transient)
         self.capture_pose_pub = self.create_publisher(

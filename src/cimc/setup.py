@@ -27,6 +27,7 @@ setup(
             'data_receiver_node = cimc.data_receiver_node:main',
             'weld_task_coordinator_node = cimc.weld_task_coordinator_node:main',
             'handeye_abb_bridge_node = cimc.handeye_abb_bridge_node:main',
+            'weld_operator_setup = cimc.weld_operator_setup:main',
         ],
     },
 )

@@ -5,4 +5,5 @@ __pycache__/
 *.pyc
 .vscode/
 scut_weld_data/
+operator_sessions/
 x86_weld_seam_test/output/local_bottom_experiment_*/

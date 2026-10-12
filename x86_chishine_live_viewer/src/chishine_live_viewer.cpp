@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -62,6 +63,7 @@ struct Options {
     bool binary_ply = true;
     std::string serial;
     std::filesystem::path save_dir = "./snapshots";
+    std::filesystem::path snapshot_manifest;
     int discovery_timeout_ms = 3000;
     int discovery_attempts = 10;
     int retry_interval_ms = 1000;
@@ -103,6 +105,7 @@ std::string help()
         "  --point-size N                Viewer point size (default: 2)\n"
         "  --max-display-points N        Display decimation limit (default: 300000)\n"
         "  --save-dir DIR                S-key snapshot directory (default: ./snapshots)\n"
+        "  --snapshot-manifest FILE      Write last saved PLY/ROI for operator setup\n"
         "  --ascii                       Save ASCII PLY; binary is default\n"
         "  --depth-min-mm N --depth-max-mm N\n"
         "  --gain F --exposure F --frame-time F\n"
@@ -171,6 +174,8 @@ Options parseOptions(int argc, char** argv)
                 std::stoull(requireValue(i, argc, argv)));
         } else if (arg == "--save-dir") {
             options.save_dir = requireValue(i, argc, argv);
+        } else if (arg == "--snapshot-manifest") {
+            options.snapshot_manifest = requireValue(i, argc, argv);
         } else if (arg == "--ascii") {
             options.binary_ply = false;
         } else if (arg == "--depth-min-mm") {
@@ -1008,6 +1013,24 @@ void runViewer(const Options& options)
                           << (roi_controls.bounds.enabled ? "on" : "off")
                           << ")\n";
                 printRoiYaml(roi_controls);
+                if (!options.snapshot_manifest.empty()) {
+                    const auto manifest_tmp = options.snapshot_manifest.string() + ".tmp";
+                    std::ofstream manifest(manifest_tmp, std::ios::trunc);
+                    if (!manifest) {
+                        throw std::runtime_error("Cannot write snapshot manifest");
+                    }
+                    const auto& roi = roi_controls.bounds;
+                    manifest << "ply: " << path.string() << '\n'
+                             << "roi.enable: " << (roi.enabled ? "true" : "false") << '\n'
+                             << "roi.min_x: " << roi.min_x << '\n'
+                             << "roi.max_x: " << roi.max_x << '\n'
+                             << "roi.min_y: " << roi.min_y << '\n'
+                             << "roi.max_y: " << roi.max_y << '\n'
+                             << "roi.min_z: " << roi.min_z << '\n'
+                             << "roi.max_z: " << roi.max_z << '\n';
+                    manifest.close();
+                    std::filesystem::rename(manifest_tmp, options.snapshot_manifest);
+                }
             } else {
                 std::cerr << "Warning: snapshot write failed: " << path << '\n';
             }
