@@ -38,6 +38,25 @@ GROUP_DEFAULTS = {
 ROI_KEYS = ('roi.enable', 'roi.min_x', 'roi.max_x', 'roi.min_y',
             'roi.max_y', 'roi.min_z', 'roi.max_z')
 MODES = ('feature_points', 'rounded_features', 'adaptive_contour')
+CAMERA_FIELDS = (
+    ('depth_min_mm', '深度下限 / mm'),
+    ('depth_max_mm', '深度上限 / mm'),
+    ('depth_gain', '深度增益'),
+    ('depth_exposure', '曝光 / μs'),
+    ('depth_frame_time', '帧时间 / μs'),
+    ('capture_max_attempts', '稀疏帧重拍次数'),
+    ('min_valid_depth_ratio', '最小有效深度比例'),
+)
+WELD_COMMON = (
+    ('feature.safe_transition_offset_y', '安全点 +Y / mm', '20'),
+    ('feature.safe_transition_offset_z', '安全点 +Z / mm', '20'),
+    ('path.rounded_corner_spacing', '内部圆角采样间距 / mm', '3'),
+    ('path.rounded_corner_point_count', '内部圆角点数（奇数）', '5'),
+    ('orientation.protruding_left.work_angle_deg', '凸角左工作角 / °', '45'),
+    ('orientation.protruding_right.work_angle_deg', '凸角右工作角 / °', '45'),
+    ('orientation.recessed_left.work_angle_deg', '凹角左工作角 / °', '45'),
+    ('orientation.recessed_right.work_angle_deg', '凹角右工作角 / °', '45'),
+)
 
 
 def camera_save_directory(camera_params):
@@ -104,6 +123,32 @@ def replace_active_overrides(config_text, changes):
     parsed = active_overrides(result)
     if any(parsed[key] != value for key, value in changes.items()):
         raise ValueError('配置写入校验失败')
+    return result
+
+
+def replace_camera_parameters(config_text, changes):
+    """Update existing ROS scalar keys only, preserving comments and unrelated YAML."""
+    original = yaml.safe_load(config_text)['chishine_camera_node']['ros__parameters']
+    missing = set(changes) - original.keys()
+    if missing:
+        raise ValueError(f'camera.yaml 缺少参数：{sorted(missing)}')
+    lines = config_text.splitlines(keepends=True)
+    found = set()
+    for index, line in enumerate(lines):
+        match = re.match(r'^(    )([a-z_]+):(.*?)(\r?\n)?$', line)
+        if match and match.group(2) in changes:
+            key = match.group(2)
+            if key in found:
+                raise ValueError(f'camera.yaml 参数重复：{key}')
+            found.add(key)
+            ending = match.group(4) or ''
+            lines[index] = f'{match.group(1)}{key}: {changes[key]}{ending}'
+    if found != set(changes):
+        raise ValueError(f'camera.yaml 未找到参数行：{sorted(set(changes) - found)}')
+    result = ''.join(lines)
+    parsed = yaml.safe_load(result)['chishine_camera_node']['ros__parameters']
+    if any(float(parsed[key]) != float(value) for key, value in changes.items()):
+        raise ValueError('相机配置写入校验失败')
     return result
 
 
@@ -280,7 +325,8 @@ class SetupWindow:
         self.original_text = config_path.read_text(encoding='utf-8')
         self.original_hash = hashlib.sha256(self.original_text.encode()).hexdigest()
         self.original = active_overrides(self.original_text)
-        self.camera_hash = hashlib.sha256(camera_path.read_bytes()).hexdigest()
+        self.camera_original_text = camera_path.read_text(encoding='utf-8')
+        self.camera_hash = hashlib.sha256(self.camera_original_text.encode()).hexdigest()
         self.session = workspace / 'operator_sessions' / time.strftime('%Y%m%d_%H%M%S')
         self.session.mkdir(parents=True, exist_ok=True)
         self.manifest = self.session / 'viewer_snapshot.yaml'
@@ -294,10 +340,10 @@ class SetupWindow:
         self.preview_index = 0
         self.preview_history = []
         self.approved = False
-        self.camera_params = yaml.safe_load(camera_path.read_text(encoding='utf-8'))[
+        self.camera_params = yaml.safe_load(self.camera_original_text)[
             'chishine_camera_node']['ros__parameters']
         self.root = tk.Tk()
-        self.root.title('焊缝任务 · 启动前确认')
+        self.root.title('华南理工大学智能焊接实验室 · 焊缝任务启动前确认')
         self.root.geometry('1060x760')
         self.root.minsize(870, 620)
         self.root.protocol('WM_DELETE_WINDOW', self.cancel)
@@ -309,6 +355,8 @@ class SetupWindow:
                         font=('Noto Sans CJK SC', 10))
         style.configure('Title.TLabel', font=('Noto Sans CJK SC', 19, 'bold'),
                         foreground='#133a56')
+        style.configure('Brand.TLabel', font=('Noto Sans CJK SC', 12, 'bold'),
+                        foreground='#167a78')
         style.configure('Muted.TLabel', foreground='#526576')
         style.configure('Safety.TLabel', foreground='#8a4b00',
                         font=('Noto Sans CJK SC', 10, 'bold'))
@@ -332,10 +380,15 @@ class SetupWindow:
             for axis, default in zip('xyz', defaults):
                 key = f'offset.{group}.{axis}'
                 self.vars[key] = tk.StringVar(value=self.original.get(key, str(default)))
+        for key, _label, default in WELD_COMMON:
+            self.vars[key] = tk.StringVar(value=self.original.get(key, default))
+        self.camera_vars = {key: tk.StringVar(value=str(self.camera_params[key]))
+                            for key, _label in CAMERA_FIELDS}
 
         outer = ttk.Frame(self.root, padding=18)
         outer.pack(fill='both', expand=True)
-        ttk.Label(outer, text='焊缝任务启动前确认', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(outer, text='华南理工大学智能焊接实验室', style='Brand.TLabel').pack(anchor='w')
+        ttk.Label(outer, text='焊缝任务启动前确认', style='Title.TLabel').pack(anchor='w', pady=(2, 0))
         ttk.Label(outer, text='① 选择点云 / ROI  →  ② 调整算法与偏移  →  ③ 离线预览  →  ④ 确认后自动处理多条 ABB 请求',
                   style='Muted.TLabel').pack(anchor='w', pady=(3, 8))
         ttk.Label(outer, text='安全边界：ABB TCP 可先连接；确认前拒绝拍照指令，不缓存旧机器人位姿。',
@@ -350,7 +403,13 @@ class SetupWindow:
         tabs.add(offset_tab, text='  2  算法与点位偏移  ')
         tabs.add(review_tab, text='  3  复核与启动  ')
 
-        capture = ttk.LabelFrame(capture_tab, text='点云来源', padding=12)
+        capture_pages = ttk.Notebook(capture_tab)
+        capture_pages.pack(fill='both', expand=True)
+        roi_page = ttk.Frame(capture_pages, padding=10)
+        camera_page = ttk.Frame(capture_pages, padding=10)
+        capture_pages.add(roi_page, text='  点云与 ROI  ')
+        capture_pages.add(camera_page, text='  相机成像参数  ')
+        capture = ttk.LabelFrame(roi_page, text='点云来源', padding=12)
         capture.pack(fill='x', pady=(0, 12))
         ttk.Button(capture, text='实时预览相机并画 ROI',
                    command=self.open_viewer).grid(row=0, column=0, sticky='w')
@@ -363,19 +422,7 @@ class SetupWindow:
         self.ply_label.grid(row=1, column=1, padx=14, pady=(8, 0), sticky='w')
         ttk.Button(capture, text='清除已选 PLY', command=self.clear_ply).grid(
             row=2, column=0, sticky='w', pady=(8, 0))
-        camera_box = ttk.LabelFrame(capture_tab, text='实时预览成像参数 · 深度值来自 camera.yaml',
-                                    padding=12)
-        camera_box.pack(fill='x', pady=(0, 12))
-        p = self.camera_params
-        camera_text = (
-            f"网络 true · USB false · 深度 {p.get('depth_min_mm')}–{p.get('depth_max_mm')} mm · "
-            f"增益 {p.get('depth_gain')} · 曝光 {p.get('depth_exposure')} μs · "
-            f"帧时间 {p.get('depth_frame_time')} μs\n"
-            f"点大小 2 · 最多显示 600000 点 · S 保存到 {camera_save_directory(p)}")
-        ttk.Label(camera_box, text=camera_text, wraplength=930).pack(anchor='w')
-        ttk.Label(camera_box, text='实时预览固定使用网络发现、关闭 USB；深度参数要到 camera.yaml 修改。本窗口仅编辑焊缝算法的 ROI/模式/点位偏移。',
-                  style='Muted.TLabel').pack(anchor='w', pady=(6, 0))
-        roi_box = ttk.LabelFrame(capture_tab, text='算法 ROI · 相机坐标系 / mm', padding=12)
+        roi_box = ttk.LabelFrame(roi_page, text='算法 ROI · 相机坐标系 / mm', padding=12)
         roi_box.pack(fill='x')
         ttk.Label(roi_box, text='启用 ROI').grid(row=0, column=0, sticky='w', pady=4)
         ttk.Combobox(roi_box, textvariable=self.vars['roi.enable'], values=('true', 'false'),
@@ -390,14 +437,45 @@ class SetupWindow:
         ttk.Label(roi_box, text='-inf / inf = 该方向不裁剪。历史 PLY 若已裁剪，也会再次应用这里的算法 ROI。',
                   style='Muted.TLabel').grid(row=5, column=0, columnspan=3, sticky='w', pady=(8, 0))
 
-        mode_box = ttk.LabelFrame(offset_tab, text='路径算法', padding=12)
+        camera_box = ttk.LabelFrame(camera_page, text='ROS 相机配置 · camera.yaml', padding=14)
+        camera_box.pack(fill='x')
+        for row, (key, label) in enumerate(CAMERA_FIELDS):
+            ttk.Label(camera_box, text=label).grid(row=row, column=0, sticky='w', pady=6)
+            ttk.Entry(camera_box, textvariable=self.camera_vars[key], width=20).grid(
+                row=row, column=1, padx=(15, 0), sticky='w')
+            ttk.Label(camera_box, text=key, style='Muted.TLabel').grid(
+                row=row, column=2, padx=(18, 0), sticky='w')
+        ttk.Label(camera_page, text=(
+            '实时预览使用上面当前输入的深度参数，网络 true / USB false、显示点大小 2、最多 600000 点；'
+            f'按 S 保存到 {camera_save_directory(self.camera_params)}。最终确认才写入 camera.yaml，ROS 相机节点随后读取。'
+            '重拍次数和有效比例仅影响 ROS 拍照节点，不影响实时预览。'),
+            style='Muted.TLabel', wraplength=900).pack(anchor='w', pady=(12, 0))
+
+        offset_pages = ttk.Notebook(offset_tab)
+        offset_pages.pack(fill='both', expand=True)
+        common_page = ttk.Frame(offset_pages, padding=10)
+        point_page = ttk.Frame(offset_pages, padding=10)
+        offset_pages.add(common_page, text='  算法与常用参数  ')
+        offset_pages.add(point_page, text='  分类点位偏移  ')
+
+        mode_box = ttk.LabelFrame(common_page, text='路径算法', padding=12)
         mode_box.pack(fill='x', pady=(0, 10))
         ttk.Label(mode_box, text='path.mode').pack(side='left')
         ttk.Combobox(mode_box, textvariable=self.vars['path.mode'], values=MODES,
                      width=24, state='readonly').pack(side='left', padx=12)
         ttk.Label(mode_box, text='feature_points 单角点 / rounded_features 圆角离散 / adaptive_contour 自适应轮廓',
                   style='Muted.TLabel').pack(side='left')
-        groups_box = ttk.LabelFrame(offset_tab, text='工件坐标系下的点位偏移 / mm', padding=10)
+        common_box = ttk.LabelFrame(common_page, text='现场常用算法参数 · 写入 weld_seam.yaml', padding=12)
+        common_box.pack(fill='x')
+        for row, (key, label, _default) in enumerate(WELD_COMMON):
+            ttk.Label(common_box, text=label).grid(row=row, column=0, sticky='w', pady=4)
+            ttk.Entry(common_box, textvariable=self.vars[key], width=15).grid(
+                row=row, column=1, padx=(12, 18), sticky='w')
+            ttk.Label(common_box, text=key, style='Muted.TLabel').grid(
+                row=row, column=2, sticky='w')
+        ttk.Label(common_page, text='工具轴方向、手眼矩阵等高风险参数仍在各自 YAML 中，不在本窗口快捷修改。',
+                  style='Safety.TLabel').pack(anchor='w', pady=(12, 0))
+        groups_box = ttk.LabelFrame(point_page, text='工件坐标系下的点位偏移 / mm', padding=10)
         groups_box.pack(fill='both', expand=True)
         for column, title in enumerate(('参数组（预览表格会标出）', 'X', 'Y', 'Z')):
             ttk.Label(groups_box, text=title).grid(row=0, column=column, padx=(0, 12), sticky='w')
@@ -406,7 +484,7 @@ class SetupWindow:
             for column, axis in enumerate('xyz', 1):
                 ttk.Entry(groups_box, textvariable=self.vars[f'offset.{group}.{axis}'],
                           width=15).grid(row=row, column=column, padx=(0, 12), pady=3, sticky='w')
-        ttk.Label(offset_tab, text='每次离线预览都会用此刻输入框里的最新数值；预览不会写正式 YAML。',
+        ttk.Label(point_page, text='离线算法预览使用当前焊缝参数；相机参数用于实时点云预览。两种预览都不写正式 YAML。',
                   style='Muted.TLabel').pack(anchor='w', pady=(10, 0))
 
         ttk.Label(review_tab, text='复核当前输入', style='Title.TLabel').pack(anchor='w')
@@ -449,6 +527,8 @@ class SetupWindow:
                   wraplength=1000).pack(anchor='w', pady=(8, 0))
         for variable in self.vars.values():
             variable.trace_add('write', self.mark_changed)
+        for variable in self.camera_vars.values():
+            variable.trace_add('write', self.mark_changed)
         self.update_review()
 
     def mark_changed(self, *_args):
@@ -458,20 +538,23 @@ class SetupWindow:
     def update_review(self):
         try:
             changes = self.changes()
+            camera_changes = self.camera_changes()
         except (ValueError, KeyError, OSError) as exc:
             self.pending.set(f'输入尚未有效：{exc}')
             self.approve_button.configure(state='disabled')
             return
-        if changes:
-            examples = '、'.join(changes.keys())
+        if changes or camera_changes:
+            weld_names = '、'.join(changes) if changes else '无'
+            camera_names = '、'.join(camera_changes) if camera_changes else '无'
             self.pending.set(
-                f'相对启动时 YAML 有 {len(changes)} 项待写入：{examples}\n'
-                f'这些值只在“确认配置”后写入 {self.config_path}。')
+                f'相机待写入 {len(camera_changes)} 项：{camera_names}\n'
+                f'焊缝待写入 {len(changes)} 项：{weld_names}\n'
+                '只有最终确认后才写入相应 src 配置 YAML。')
         else:
-            self.pending.set('当前输入与启动时 YAML 一致；确认时不会重写配置文件。')
+            self.pending.set('当前输入与启动时两份 YAML 一致；确认时不会重写配置文件。')
         preview_needed = bool(changes or self.ply is not None)
         try:
-            preview_current = self.preview_signature == self.signature(changes)
+            preview_current = self.preview_signature == self.signature(changes, camera_changes)
         except OSError as exc:
             self.pending.set(f'已选点云文件不可用：{exc}')
             self.approve_button.configure(state='disabled')
@@ -488,7 +571,10 @@ class SetupWindow:
                     f'结果在 {self.preview_result_ply}。')
                 self.warning_info.set('\n'.join(self.preview_warnings))
             else:
-                self.preview_info.set('无需修改或预览；可直接沿用已有 YAML 启动自动链路。')
+                self.preview_info.set(
+                    '相机参数已校验，但没有点云可离线验收成像；确认后仍须现场核对。'
+                    if camera_changes else
+                    '无需修改或预览；可直接沿用已有 YAML 启动自动链路。')
                 self.warning_info.set('')
 
     def changes(self):
@@ -502,16 +588,36 @@ class SetupWindow:
                 if not math.isfinite(number) or abs(number) > 100:
                     raise ValueError(f'{key} 必须是有限数，绝对值不超过 100 mm')
                 value = format(number, '.9g')
+            elif key == 'path.rounded_corner_point_count':
+                count = int(value)
+                if str(count) != value or count < 1 or count > 9 or count % 2 != 1:
+                    raise ValueError('内部圆角点数必须是 1–9 内的奇数')
+            elif key in {item[0] for item in WELD_COMMON}:
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError(f'{key} 必须是有限数')
+                if key.endswith('work_angle_deg') and not 0 < number < 90:
+                    raise ValueError(f'{key} 必须在 0–90° 之间（不含端点）')
+                if key == 'path.rounded_corner_spacing' and not 0 < number <= 50:
+                    raise ValueError('圆角采样间距必须大于 0 且不超过 50 mm')
+                if key.startswith('feature.safe_transition_') and not 0 <= number <= 100:
+                    raise ValueError('安全点抬离距离必须在 0–100 mm')
+                value = format(number, '.9g')
             wanted[key] = value
         if wanted['roi.enable'] not in ('true', 'false') or wanted['path.mode'] not in MODES:
             raise ValueError('ROI 开关或算法模式无效')
         for axis in 'xyz':
             if float(wanted[f'roi.min_{axis}']) > float(wanted[f'roi.max_{axis}']):
                 raise ValueError(f'ROI {axis.upper()} 最小值大于最大值')
+        if (float(wanted['feature.safe_transition_offset_y']) <= 0 and
+                float(wanted['feature.safe_transition_offset_z']) <= 0):
+            raise ValueError('安全点 +Y 和 +Z 不可同时为 0')
         changes = {}
         for key, value in wanted.items():
             previous = self.original.get(key, value)
-            if key.startswith('offset.') or (key.startswith('roi.') and key != 'roi.enable'):
+            if (key.startswith('offset.') or
+                    (key.startswith('roi.') and key != 'roi.enable') or
+                    key in {item[0] for item in WELD_COMMON}):
                 # YAML often spells the same number as 1.000 or 188.380. Do not
                 # silently rewrite tuned values when the operator did not edit them.
                 changed = float(value) != float(previous)
@@ -521,16 +627,48 @@ class SetupWindow:
                 changes[key] = value
         return changes
 
+    def current_camera_params(self):
+        params = dict(self.camera_params)
+        for key, _label in CAMERA_FIELDS:
+            value = self.camera_vars[key].get().strip()
+            try:
+                if key in ('depth_min_mm', 'depth_max_mm', 'capture_max_attempts'):
+                    number = int(value)
+                    if str(number) != value:
+                        raise ValueError()
+                else:
+                    number = float(value)
+                    if not math.isfinite(number):
+                        raise ValueError()
+            except ValueError as exc:
+                raise ValueError(f'相机 {key} 必须输入有效数值') from exc
+            params[key] = number
+        if not 0 <= params['depth_min_mm'] < params['depth_max_mm']:
+            raise ValueError('相机深度范围必须满足 0 ≤ 下限 < 上限')
+        if params['depth_gain'] < 0 or params['depth_exposure'] <= 0 or params['depth_frame_time'] <= 0:
+            raise ValueError('增益必须 ≥ 0；曝光与帧时间必须 > 0')
+        if params['depth_exposure'] > params['depth_frame_time']:
+            raise ValueError('曝光时间不能超过帧时间')
+        if params['capture_max_attempts'] < 1 or not 0 <= params['min_valid_depth_ratio'] < 1:
+            raise ValueError('重拍次数须 ≥ 1；最小有效深度比例须在 [0,1)')
+        return params
+
+    def camera_changes(self):
+        params = self.current_camera_params()
+        return {key: str(params[key]) for key, _label in CAMERA_FIELDS
+                if params[key] != self.camera_params[key]}
+
     def open_viewer(self):
         exe = self.workspace / 'x86_chishine_live_viewer/build/chishine_live_viewer'
         if not exe.is_file():
             messagebox.showerror('预览程序缺失', f'请先构建：{exe}')
             return
         try:
+            camera_params = self.current_camera_params()
             roi_values = {key: self.vars[key].get().strip() for key in ROI_KEYS}
             command = viewer_command(
-                exe, camera_save_directory(self.camera_params), self.manifest,
-                self.camera_params, roi_values)
+                exe, camera_save_directory(camera_params), self.manifest,
+                camera_params, roi_values)
             previous_manifest_time = (
                 self.manifest.stat().st_mtime_ns if self.manifest.is_file() else None)
             self.status.set('实时预览独占相机：按 S 保存 ROI 点云，再按 Q 退出。')
@@ -581,19 +719,21 @@ class SetupWindow:
         self.preview_window = PreviewWindow(self.root, item['result_ply'], item['rows'])
         self.preview_window.open_ply(item['result_ply'])
 
-    def signature(self, changes):
+    def signature(self, changes, camera_changes=None):
         if self.ply is None:
             file_identity = None
         else:
             stat = self.ply.stat()
             file_identity = (str(self.ply.resolve()), stat.st_size, stat.st_mtime_ns)
-        return (file_identity, tuple(sorted(changes.items())))
+        return (file_identity, tuple(sorted(changes.items())),
+                tuple(sorted((camera_changes or {}).items())))
 
     def preview(self):
         try:
             if self.viewer_running or self.ply is None or not self.ply.is_file():
                 raise ValueError('请先选择历史 PLY，或在实时预览中按 S 保存并按 Q 退出')
             changes = self.changes()
+            camera_changes = self.camera_changes()
             overrides = dict(self.original)
             overrides.update(changes)
             exe = self.workspace / 'x86_weld_seam_test/install/bin/weld_seam_extractor'
@@ -627,13 +767,14 @@ class SetupWindow:
             if self.preview_window is not None and self.preview_window.window.winfo_exists():
                 self.preview_window.window.destroy()
             self.preview_window = PreviewWindow(self.root, result_ply, rows)
-            self.preview_signature = self.signature(changes)
+            self.preview_signature = self.signature(changes, camera_changes)
             self.preview_rows = rows
             self.preview_warnings = warnings
             self.preview_result_ply = result_ply
             self.preview_history.append({
                 'result_ply': result_ply, 'rows': rows,
                 'source_ply': self.ply, 'changes': dict(changes),
+                'camera_changes': dict(camera_changes),
             })
             self.history_listbox.insert(
                 'end', f'{prefix} · {len(rows)} 点 · 变更 {len(changes)} 项 · '
@@ -655,39 +796,63 @@ class SetupWindow:
             if self.viewer_running:
                 raise ValueError('请先按 Q 关闭相机预览，释放相机连接')
             changes = self.changes()
-            if (changes or self.ply is not None) and self.preview_signature != self.signature(changes):
+            camera_changes = self.camera_changes()
+            if ((changes or self.ply is not None) and
+                    self.preview_signature != self.signature(changes, camera_changes)):
                 raise ValueError('已选择 PLY 或修改参数；必须针对当前数值成功预览后才能确认')
             current_text = self.config_path.read_text(encoding='utf-8')
+            camera_text = self.camera_path.read_text(encoding='utf-8')
             if hashlib.sha256(current_text.encode()).hexdigest() != self.original_hash:
                 raise ValueError('YAML 被其他程序修改；为避免覆盖请取消并重新启动')
-            if hashlib.sha256(self.camera_path.read_bytes()).hexdigest() != self.camera_hash:
+            if hashlib.sha256(camera_text.encode()).hexdigest() != self.camera_hash:
                 raise ValueError('camera.yaml 在窗口打开后被修改；请重新启动以核对成像参数')
+            proposed_weld = replace_active_overrides(current_text, changes) if changes else current_text
+            proposed_camera = replace_camera_parameters(camera_text, camera_changes) if camera_changes else camera_text
+            warning_text = ('算法提示：' + '\n'.join(self.preview_warnings) + '\n\n'
+                            if self.preview_warnings else '')
             if not messagebox.askyesno('最终确认',
                     f'确认启动自动链路？\n\n'
-                    f'写入目标：{self.config_path}\n'
-                    f'本次待写入 {len(changes)} 项；'
+                    f'相机配置 {self.camera_path}：{len(camera_changes)} 项\n'
+                    f'焊缝配置 {self.config_path}：{len(changes)} 项\n'
                     f'{"当前预览点数 " + str(len(self.preview_rows)) if self.preview_rows else "沿用现有配置，跳过离线预览"}。\n\n'
-                    + ('算法提示：' + '\n'.join(self.preview_warnings) + '\n\n'
-                       if self.preview_warnings else '') +
+                    + warning_text +
                     '确认后启动相机、焊缝、手眼、协调节点；'
                     '之后多条 ABB 请求自动处理，不再逐次询问。',
                     parent=self.root):
                 return
+            plans = []
+            if camera_changes:
+                plans.append((self.camera_path, camera_text, proposed_camera,
+                              self.session / 'camera.before.yaml'))
             if changes:
-                updated = replace_active_overrides(current_text, changes)
-                (self.session / 'weld_seam.before.yaml').write_text(current_text, encoding='utf-8')
-                temporary = self.config_path.with_name(self.config_path.name + '.operator_tmp')
-                temporary.write_text(updated, encoding='utf-8')
-                os.replace(temporary, self.config_path)
-            (self.session / 'approval.json').write_text(json.dumps({
-                'approved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                'config': str(self.config_path), 'changes': changes,
-                'preview_ply': str(self.ply) if self.ply else None,
-                'preview_result_ply': str(self.preview_result_ply) if self.preview_result_ply else None,
-                'preview_points': len(self.preview_rows) if self.preview_rows else None,
-                'config_sha256_after': hashlib.sha256(
-                    self.config_path.read_bytes()).hexdigest(),
-            }, ensure_ascii=False, indent=2), encoding='utf-8')
+                plans.append((self.config_path, current_text, proposed_weld,
+                              self.session / 'weld_seam.before.yaml'))
+            completed = []
+            try:
+                for path, before, updated, backup in plans:
+                    backup.write_text(before, encoding='utf-8')
+                    temporary = path.with_name(path.name + '.operator_tmp')
+                    temporary.write_text(updated, encoding='utf-8')
+                    os.replace(temporary, path)
+                    completed.append((path, before))
+                (self.session / 'approval.json').write_text(json.dumps({
+                    'approved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'config': str(self.config_path), 'changes': changes,
+                    'camera_config': str(self.camera_path), 'camera_changes': camera_changes,
+                    'preview_ply': str(self.ply) if self.ply else None,
+                    'preview_result_ply': str(self.preview_result_ply) if self.preview_result_ply else None,
+                    'preview_points': len(self.preview_rows) if self.preview_rows else None,
+                    'config_sha256_after': hashlib.sha256(
+                        self.config_path.read_bytes()).hexdigest(),
+                    'camera_sha256_after': hashlib.sha256(
+                        self.camera_path.read_bytes()).hexdigest(),
+                }, ensure_ascii=False, indent=2), encoding='utf-8')
+            except Exception:
+                for path, before in reversed(completed):
+                    temporary = path.with_name(path.name + '.operator_tmp')
+                    temporary.write_text(before, encoding='utf-8')
+                    os.replace(temporary, path)
+                raise
             self.approved = True
             self.root.destroy()
         except Exception as exc:
