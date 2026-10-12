@@ -16,7 +16,7 @@
 
 2.4.8 区分“检测链首末确认角”和“实际焊接路径首末”：若确认角之外还有至少 40 mm 的受支持实测直线，则真正的首末焊点是直线端点，确认角属于路径内部，可展开五点圆角；短边缘直线仍保留角点单点。这样恢复 398、092948、085227 的下底边圆角及 730 的缺失圆角，同时保持 5559、444 和两组测试视野的首末角单点。四类姿态、内部空洞和共面高度规则不变。
 
-2.4.9 在工作区增加**默认关闭的离线候选姿态**：`path.rounded_use_corner_pose_interpolation=true` 时，五点圆角中心精确使用旧版单角点姿态，其余四点在中心与前/后旧版角点姿态之间做最短旋转插值；`path.rounded_pose_outer_blend` 控制最外侧点朝相邻角点转动的比例（0–0.5，默认 0.25）。两个圆角之间的直线中点姿态取相邻圆角靠直线侧的两个实际输出端点姿态的球面中点；因此实验模式下中点的独立 `orientation.straight_*` 工艺角不再决定其姿态，但各组位置偏移仍有效。位置、四类中心姿态及旧版 `feature_points` 不变。该方案在历史点云上减轻了圆角外侧过倾斜，但部分圆角的焊枪轴线交汇偏差从旧版测试要求的 3 mm 增至约 5.5 mm，尚未通过该项严格回归，也没有 ABB 关节可达性验证。因此**未安装到现场 SDK，ROS launch 仍使用原已安装版本**；禁止将此试验开关直接用于自动焊接。
+2.4.9 在工作区增加**默认关闭的离线候选姿态**：`path.rounded_use_corner_pose_interpolation=true` 时，五点圆角中心精确使用旧版单角点姿态，其余四点在中心与前/后旧版角点姿态之间做最短旋转插值；`path.rounded_pose_outer_blend` 控制最外侧点朝相邻角点转动的比例（0–0.5，默认 0.25）。两个圆角之间的直线中点姿态取相邻圆角靠直线侧的两个实际输出端点姿态的球面中点；因此实验模式下中点的独立 `orientation.straight_*` 工艺角不再决定其姿态，但各组位置偏移仍有效。位置、四类中心姿态及旧版 `feature_points` 不变。该方案在历史点云上减轻了圆角外侧过倾斜，但部分圆角的焊枪轴线交汇偏差从旧版测试要求的 3 mm 增至约 5.5 mm，尚未通过该项严格回归，也没有 ABB 关节可达性验证。**当时未安装该候选版；当前已安装库为 2.4.10，但 ROS YAML 选择的是另一策略 `old_corner_constant`，并未启用此实验开关。**不可因库包含此选项就直接用于自动焊接。
 
 2.4.10 另有 `path.rounded_pose_strategy=old_corner_constant`：每组完整圆角的 5 个点（或边界单点）全部复制该角在旧版 `feature_points` 下的姿态，仅改变 TCP 位置；斜边中点为相邻旧角点姿态的球面中点，水平边中点保留现有独立姿态。此策略应与 `path.rounded_use_corner_pose_interpolation=false` 一起使用；默认仍为 `legacy`。同组焊枪轴线平行，不适用“圆弧 5 条轴线交汇于一点”的旧测试；这不是 ABB 逆解、关节限位或碰撞已通过的证明。工作区 ROS 已安装并使用 2.4.10，姿态策略由 ROS YAML 显式启用。
 
@@ -40,7 +40,7 @@ python3 x86_weld_seam_test/tests/local_bottom_experiment.py
 | `main.cpp` | 完整焊缝/拐点/姿态算法；既是 CLI 源码也是 SDK 实现 |
 | `CMakeLists.txt` | 构建 CLI、共享库、安装包和 CMake 导出配置 |
 | `include/weld_seam_sdk/weld_seam_sdk.hpp` | 稳定的 C++ SDK 公共接口 |
-| `config/default.conf` | 全部可运行时修改的算法参数及当前生产默认值 |
+| `config/default.conf` | SDK 参数默认示例；ROS 现场实际覆盖值以 `src/weld_seam_perception/config/weld_seam.yaml` 为准 |
 | `参数手册.md` | 全部运行参数的逐项中文含义、坐标方向和调参顺序 |
 | `cmake/weld_seam_sdkConfig.cmake.in` | 供安装后的 `find_package` 使用 |
 | `build/` | 本机编译目录，可删除后重新生成 |
@@ -258,13 +258,16 @@ roi.max_y=300
 
 ## 8. 安装共享 SDK，供 ROS 2 使用
 
-推荐安装在用户目录，避免污染系统：
+**当前 ROS 适配包只从本工作区 `x86_weld_seam_test/install` 找 SDK**，不要误把外部 `~/scut_weld_sdk_install` 的更新当作 ROS 已更新。先确认工作目录是 `/home/mini/x86_ros2_ws/x86_weld_seam_test`，再安装到本工程专用前缀：
 
 ```bash
-cmake --install build --prefix "$HOME/scut_weld_sdk_install"
-export CMAKE_PREFIX_PATH="$HOME/scut_weld_sdk_install:$CMAKE_PREFIX_PATH"
-export LD_LIBRARY_PATH="$HOME/scut_weld_sdk_install/lib:$LD_LIBRARY_PATH"
+cmake --install build --prefix /home/mini/x86_ros2_ws/x86_weld_seam_test/install
+cd /home/mini/x86_ros2_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select weld_seam_perception --base-paths src
 ```
+
+源码 `CMakeLists.txt` 的版本、`install/lib/libweld_seam_sdk.so*` 和 ROS 节点启动日志应分别核对；只改源码、只编译但未安装、或只安装而未重建 ROS 包都可能使现场继续运行旧库。外部独立仓库 `/home/mini/x86_weld_seam_test` 有独立 Git 历史，不会被这组命令自动安装。
 
 其他 CMake 工程的用法：
 

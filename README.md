@@ -1,460 +1,99 @@
-# SCUT/CIMC x86 ROS 2 精简工作区
+# 华南理工大学智能焊接实验室 · x86 ROS 2 工作区
 
-本工作区面向 Ubuntu 22.04 x86_64 + ROS 2 Humble，用于 Chishine 3D 相机采集、波纹板焊缝识别、手眼变换、ABB 通信以及后续焊机/旋弧电机联动。
+> Ubuntu 22.04 · ROS 2 Humble · Chishine 3D 相机 · 波纹板焊缝识别 · 手眼变换 · ABB TCP
 
-当前已经打通“ABB 拍照请求 -> 相机软件触发 -> PLY -> 焊缝 SDK -> 相机坐标系焊接位姿 -> 手眼变换 -> `robot_base` 轨迹 -> ABB 接收确认”的 ROS 2 链路，既有四类拐点模式已与真实 ABB 完成收发和点位联调。2026-09-28 将焊缝 SDK 升级为 2.4.0：默认继续使用现场稳定的 `feature_points`，新增 `rounded_features` 稀疏圆角模式，复用旧四类工具坐标系与工艺角，完整圆角取 5 个实测红点、每段直线取 1 个实测中点，边界/缺测角退化为单个实测点；原 `adaptive_contour` 仍保留用于回退。2.4.0 已完成历史 PLY 离线回归，尚未进行真实硬件验证。
+本仓库的当前主线任务是：收到 ABB 的拍照位姿，采集点云，提取焊接轨迹，把相机坐标系下的位姿转换到机器人基坐标系，再将轨迹发回 ABB。焊机、电机和第三方焊接决策代码仍保留在仓库中，**不属于当前总 launch 的运行链路**。
 
-2026-09-10 开始把焊接工艺决策移交给 `192.168.3.5`：x86 不再根据 ABB 点号自行选择工艺，只负责校验并执行送气、起焊、实时电流/旋转速度和停焊指令。双方固定使用逐行 JSON v1 协议；`data_receiver_node` 把第三方请求直接映射到现有焊机/电机话题，并把 ABB 数据和每个焊机 TPDO1 真实反馈按带边界的 JSON 帧发回 `192.168.3.5:50000`。完整协议见 [第三方焊接通信协议.md](./第三方焊接通信协议.md)。
+> [!WARNING]
+> 本工程可连接真实机器人。`send_to_abb=true` 表示会向 ABB socket 发送轨迹；是否存点、规划或运动由 ABB 端程序决定。离线预览、编译通过、socket 发送成功、ABB ACK，都不能证明机器人可达或焊接安全。首次现场验证须由现场人员确认安全模式、禁弧、低速和单点检查。
 
-本版本提供阶段性的 `camera_weld_handeye_test.launch.py`，只启动相机、焊缝感知、手眼桥和任务协调节点。它不是生产 launch，不启动 ABB TCP、焊机、焊接逻辑或电机节点，且强制 `send_to_abb=false`。
+## 从这里开始
 
-2026-09-17 新增 `camera_weld_handeye_abb_test.launch.py`，用于工控机 `192.168.3.100:45000` 与 ABB `192.168.3.2` 双向联调。该 launch 要求 `send_to_abb=true`，但仍不启动机器人运动、焊机或电机节点；ABB 程序当前只允许存储和打印轨迹。
+| 我想做什么 | 阅读位置 |
+| --- | --- |
+| 启动人工 ROI/参数复核，再连续处理 ABB 请求 | [人工标定与自动运行](src/cimc/人工标定与自动运行.md) |
+| 固定夹具、不打开标定窗口直接运行 | [实际启动与分节点测试手册](实际启动与分节点测试手册.md) |
+| 查节点、话题、QoS 和数据单位 | [ROS 2 节点与接口](ROS2全部节点与接口说明.md) |
+| 调焊缝 ROI、角点、姿态与偏移 | [焊缝节点说明](src/weld_seam_perception/README.md) · [当前 YAML](src/weld_seam_perception/config/weld_seam.yaml) |
+| 查算法 C++、SDK 构建或独立 PLY 测试 | [工作区内算法源码](x86_weld_seam_test/README.md) |
+| 查相机参数和实时 ROI 查看器 | [相机 ROS 包](src/chishine_camera_ros2/README.md) · [实时查看器](x86_chishine_live_viewer/README.md) |
+| 查 ABB/手眼实现与第三方历史接口 | [cimc 包](src/cimc/README.md) · [第三方协议](第三方焊接通信协议.md) |
 
-## 1. 最终目录和保留内容
-
-```text
-x86_ros2_ws/
-├── README.md
-├── order.txt
-├── ROS2全部节点与接口说明.md
-├── 实际启动与分节点测试手册.md
-├── 第三方焊接通信协议.md       # 与192.168.3.5约定的JSONL v1
-├── x86_chishine_camera_test/   # 相机SDK与独立抓图参考，COLCON_IGNORE
-├── x86_chishine_live_viewer/   # 实时点云选位工具，COLCON_IGNORE
-├── x86_weld_seam_test/         # 焊缝算法/CLI/SDK源码，独立CMake工程
-├── scut_weld_sdk_install/      # 历史SDK安装快照，仅作兼容参考
-└── src/
-    ├── cimc/                    # Python：ABB 数据 + 旋转焊枪电机
-    ├── weld_controller/         # C++：USB-CAN 焊机 + 历史工艺逻辑
-    ├── chishine_camera_ros2/    # C++：相机发现、软件触发、PLY 发布
-    └── weld_seam_perception/    # C++：进程内调用 weld_seam_sdk
-```
-
-仓库根目录的独立参考/SDK目录不位于 `src/`，不会被 colcon 当作 ROS package。当前机器使用 `~/x86_chishine_camera_test/vendor_sdk` 和 `~/scut_weld_sdk_install`；焊缝 SDK 的受控源码位于本仓库 `x86_weld_seam_test/`，仓库内同名安装快照不是当前运行库。换机时需要先从受控源码安装 SDK，再按本文设置路径。旧 `weld_logic_node.cpp` 只保留为历史源码，不再编译或安装；第三方命令由 `data_receiver_node` 直接映射到底层话题。
-
-每个包目录均有自己的中文 `README.md`，说明内部源码、参数和接口。
-
-## 2. 节点关系总图
+## 当前运行链路
 
 ```mermaid
 flowchart LR
-    ABB["ABB TCP\nSTART_CAPTURE + Base_from_TCP"] --> D["data_receiver_node"]
-    D --> Q["weld_task_coordinator_node"]
-    SIM["无ABB时手工模拟 /abb/raw_text"] --> Q
-    Q -->|"Trigger /camera/capture"| C["chishine_camera_node"]
-    C -->|"保存 PLY"| P[("~/scut_weld_data/pointclouds")]
-    C -->|"/camera/pointcloud_file\nString 绝对路径"| S["weld_seam_node"]
-    S -->|"进程内 C++ 调用"| SDK["libweld_seam_sdk.so 2.4.0"]
-    SDK --> R[("~/scut_weld_data/weld_results")]
-    S -->|"/weld_seam/poses_camera_frame"| H["handeye_abb_bridge_node"]
-    Q -->|"拍照时 Base_from_TCP + 单次授权"| H
-    H -->|"/abb/trajectory_tcp\nrobot_base，m"| CHECK["离线检查/手动示教验证"]
-    H -. "send_to_abb=true 时才发送" .-> D
-    S -->|"CSV/状态/可视化路径"| V["调试与记录"]
-
-    D -->|"/abb/weld_point"| MON["监视/记录"]
-    W["weld_controller_node\nUSB-CAN"] -->|"/weld/status"| WMON["焊机诊断监视"]
-    W -->|"/weld/feedback_raw\n逐帧6字节"| D
-    D <-->|"JSONL v1\n命令/ACK/ABB/焊机反馈"| EXT["192.168.3.5\n外部焊接决策"]
-    D -->|"/weld/control\n/weld/set_param_real"| W
-    D -->|"/cimc/motor_speed"| M["motor_control_node\n偏心焊枪电机"]
-    TSIM["当前人工测试\n直接发布底层话题"] --> W
-    TSIM --> M
+    ABB["ABB TCP<br/>START_CAPTURE + 拍照时 Base←TCP"] --> RX["data_receiver_node"]
+    RX -->|/abb/raw_text| TASK["weld_task_coordinator_node"]
+    TASK -->|/camera/capture| CAM["chishine_camera_node"]
+    CAM -->|PLY 写盘 + 路径话题| SEAM["weld_seam_node<br/>进程内调用 SDK"]
+    SEAM -->|相机系 PoseArray| HE["handeye_abb_bridge_node"]
+    TASK -->|拍照 TCP 位姿 + 单次授权| HE
+    HE -->|robot_base PoseArray| CHECK["状态/离线核对"]
+    HE -->|/abb/tx_text| RX
+    RX -->|轨迹文本| ABB
 ```
 
-相机节点与算法节点通过“文件绝对路径”解耦。相机服务返回成功且 PLY 完整写盘后才发布路径，算法节点收到路径后同步提取，避免读取半写文件。
+运行阶段是 **5 个核心 ROS 节点**。人工模式确认后默认还会打开 1 个只读状态窗进程；标定窗口本身不是 ROS 节点。固定模式沿用旧 ABB launch，不打开该状态窗。默认不开多个 `ros2 topic echo` 调试进程，也不启动 `weld_controller_node`、`motor_control_node` 或旧 `weld_logic_node`。`data_receiver.yaml` 中 `third_party_link_enabled=false`，因此 192.168.3.5 通道不连接。
 
-### 2.1 当前开发进度
+相机与算法之间的 ROS 消息是 **PLY 文件绝对路径**，不是完整点云；大点云经磁盘传递。焊缝 CSV/PLY 的 XYZ 为相机系 mm，ROS `PoseArray` 位置为 m，四元数按 ROS 字段 `x,y,z,w`；ABB 轨迹文本使用 mm 与 `qw,qx,qy,qz`。具体帧、矩阵方向和 topic 见[接口说明](ROS2全部节点与接口说明.md)。
 
-| 模块 | 当前状态 |
-|---|---|
-| Chishine 相机独立抓图与实时查看器 | 历史硬件单测和 2026-09-03 现场连接通过 |
-| ROS 相机软件触发与 PLY 发布 | 现场软触发成功，960x600 点云已落盘并发布 |
-| 焊缝 SDK 2.4.0 与 ROS 进程内调用 | `feature_points` 逐字回归2.3.1结果；`rounded_features` 使用旧坐标系、实测圆角5点与直线中点并满足100点上限；待真实硬件低速验证 |
-| 焊缝关键点与相机系姿态 | Tool X 可选工件 `+X/-X` 或旧角平分线；5 组 PLY 离线回归保持 XYZ/分类/Tool Z 不变，真实姿态待验证 |
-| 任务协调与手眼桥接 | 完整链路已输出 8 个基坐标位姿，XYZ 初步现场对齐；需重建 TCP、重做手眼后再验证姿态与可达性 |
-| ABB 自动接收/发送 | 已增加 `.3.100:45000 <- .3.2` 双向联调 launch、换行分帧与轨迹文本输出；真实 ABB 收发待现场验证 |
-| 焊机与旋弧电机远程执行 | JSONL v1 和直接话题映射已实现；一元模式为默认，真实焊机/电机及 192.168.3.5 待联调 |
-| 旧固定点号工艺逻辑 | 不再作为当前架构的大脑；仅保留源码，不编译、不安装 |
+## 两种正常启动方式
 
-下一次现场主流程只执行一次完整任务：全部计算节点先就绪，再模拟 `START_CAPTURE`，由协调节点触发唯一一次拍照、焊缝提取和手眼变换。直接调用 `/camera/capture` 只保留作相机/算法独立排障，不插入主流程。
-
-## 3. 为什么 ROS 2 不启动算法可执行文件
-
-最终选择共享库进程内调用，独立 CLI 只用于离线回归。
-
-| 方案 | 开销/可靠性 | 结论 |
-|---|---|---|
-| ROS 节点 `fork/exec` CLI | 每次创建进程、拼接命令行、解析退出码；错误和结果只能靠文本/文件传递 | 保留作人工测试，不作为正式节点 |
-| ROS 节点链接 `libweld_seam_sdk.so` | 无进程创建，参数/状态/计时为结构化 C++ 数据；可直接发布 PoseArray | 当前采用 |
-
-真正主要耗时仍是 PLY I/O、法向量和平面/焊缝算法，进程内调用不能消除这些计算，但不会增加不必要的进程调度和二次解析。算法 SDK 与 CLI 来自同一个 `main.cpp`，可减少“离线结果与 ROS 结果不一致”的风险。
-
-## 4. 新工控机安装基础环境
-
-先完成 ROS 2 Humble 官方安装，再安装本工程依赖：
+先在新终端加载环境，并确保实时相机查看器已经退出、ABB 程序处于现场确认的安全调试模式：
 
 ```bash
 source /opt/ros/humble/setup.bash
-sudo apt update
-sudo apt install -y \
-  build-essential cmake git \
-  python3-colcon-common-extensions python3-rosdep python3-serial \
-  libpcl-dev libeigen3-dev \
-  ros-humble-rclcpp ros-humble-rclpy \
-  ros-humble-std-msgs ros-humble-std-srvs ros-humble-geometry-msgs
+source /home/mini/x86_ros2_ws/install/setup.bash
 ```
 
-如首次使用 rosdep：
+| 模式 | 命令 | 用途 |
+| --- | --- | --- |
+| 人工复核（默认） | `ros2 launch cimc camera_weld_operator_abb.launch.py` | 可选历史 PLY 或实时相机 ROI；预览后确认配置，之后连续处理 ABB 请求 |
+| 固定夹具 | `ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=fixed` | 直接使用已确认的 YAML，不打开标定窗口 |
+| 旧的无 ABB 输出测试 | `ros2 launch cimc camera_weld_handeye_test.launch.py` | 仅在其独立安全配置满足预检时使用；不是当前 ABB 主链路 |
+
+总 launch 默认 `echo_topics:=false`、`show_operator_status:=true`、`use_shared_memory:=true`。`show_operator_status` 仅对人工模式有效；需要终端逐话题日志可设 `echo_topics:=true`。Fast DDS 的 `DEFAULT` 传输使同机节点优先使用 SHM，并保留 UDPv4 发现/回退；若现场有 DDS 兼容问题，用 `use_shared_memory:=false` 继承原有环境。**不是 SHM-only，也不是点云零拷贝。**
+
+人工模式会先开启 ABB TCP 监听，再等待操作员确认；确认前的 `START_CAPTURE` 不会排队执行。固定模式或直接运行旧 ABB launch 不提供这一人工确认关口。详细操作与安全条件见[人工标定说明](src/cimc/人工标定与自动运行.md)。
+
+## 参数在哪里生效
+
+现场可调的相机、算法、手眼和网络参数来自以下 **`src` 下的配置文件**，launch 不另写一套这些参数。唯一的运行门禁例外是人工模式向 ABB 接收节点传入 `hold_capture_until_coordinator_ready=true`，确保人工确认前拒绝请求。改 YAML 后重新启动相应节点或 launch 即可；改 C++/Python 或 SDK 源码则必须重新构建。
+
+| 模块 | 唯一现场配置入口 | 重点 |
+| --- | --- | --- |
+| 相机 | [`src/chishine_camera_ros2/config/camera.yaml`](src/chishine_camera_ros2/config/camera.yaml) | 深度范围、增益、曝光、帧时间、采集有效率 |
+| 焊缝 | [`src/weld_seam_perception/config/weld_seam.yaml`](src/weld_seam_perception/config/weld_seam.yaml) | `algorithm_overrides` 中的 ROI、`path.mode`、角点姿态和偏移 |
+| 手眼 | [`src/cimc/config/handeye_bridge.yaml`](src/cimc/config/handeye_bridge.yaml) | 矩阵文件路径、键名、方向、单位、`send_to_abb` |
+| 协调 | [`src/cimc/config/weld_task_coordinator.yaml`](src/cimc/config/weld_task_coordinator.yaml) | 拍照命令、TCP 位姿单位、任务同步 |
+| ABB TCP | [`src/cimc/config/data_receiver.yaml`](src/cimc/config/data_receiver.yaml) | 本机监听地址、ABB 来源 IP、第三方通道开关 |
+
+当前焊缝 YAML 使用 `path.mode=rounded_features`，且已启用特定拍照位置的 X/Y ROI 和分类偏移；**不能把它当作所有工件、所有拍照位的通用参数**。`feature_points` 是旧单角点模式，`adaptive_contour` 是备用模式。三种模式输出接口相同，但点数、姿态和可达性均须分别检查。
+
+## 构建与算法版本
+
+ROS 适配包 `weld_seam_perception` 直接链接工作区内 `x86_weld_seam_test/install` 的 SDK，见其 [`CMakeLists.txt`](src/weld_seam_perception/CMakeLists.txt)。它**不**从外部 `~/scut_weld_sdk_install` 自动取当前库。工作区算法源码的 CMake 版本与已安装 `.so` 可能不同；以节点启动日志的 `Weld seam SDK ... ready` 和工作区 SDK 安装目录中的库为实际运行依据。修改算法源码仅编辑文件而未重新安装 SDK、重建 ROS 包，现场运行结果不会随之变化。
+
+日常仅构建受影响的包，例如：
 
 ```bash
-sudo rosdep init       # 已初始化时会提示，忽略即可
-rosdep update
-```
-
-## 5. 先构建并安装焊缝 SDK
-
-ROS 包 `weld_seam_perception` 通过 CMake config 查找 SDK：
-
-```bash
-cd ~/x86_ros2_ws/x86_weld_seam_test
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-cmake --install build --prefix "$HOME/scut_weld_sdk_install"
-
-export CMAKE_PREFIX_PATH="$HOME/scut_weld_sdk_install:$CMAKE_PREFIX_PATH"
-export LD_LIBRARY_PATH="$HOME/scut_weld_sdk_install/lib:$LD_LIBRARY_PATH"
-```
-
-历史 SDK 2.2.1 和本次修改前 2.2.2 的源码快照分别保存在
-`~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.1` 与 `backups/2.2.2`。
-安装目录保留版本化动态库 `libweld_seam_sdk.so.2.2.1`、
-`libweld_seam_sdk.so.2.2.2`、`libweld_seam_sdk.so.2.3.0` 和
-`libweld_seam_sdk.so.2.4.0`；正常切换版本仍应从
-对应源码重新构建、安装并重启 ROS 节点，不建议手工改动动态库软链接。
-
-建议把最后两行加入项目专用环境脚本，而不是全局覆盖系统库搜索顺序。
-
-## 6. 准备相机 SDK
-
-相机 SDK 仍可保持在工作区同级目录：
-
-```text
-~/x86_ros2_ws
-~/x86_chishine_camera_test
-```
-
-相机 ROS 包能自动找到 `../x86_chishine_camera_test/vendor_sdk`。也可显式设置，更利于部署日志复现：
-
-```bash
-export CHISHINE_3D_CAMERA_SDK_ROOT="$HOME/x86_chishine_camera_test/vendor_sdk"
-```
-
-先按相机独立工程 README 运行 `--list` 和 `--capture`，确认 SDK/网卡/相机完全正常。
-
-## 7. 安装 controlcan 头文件和动态库
-
-用户会从 CAN 盒 SDK 手动提供 `controlcan.h` 与 x86_64 `libcontrolcan.so`。推荐安装：
-
-```bash
-sudo install -m 0644 controlcan.h /usr/local/include/controlcan.h
-sudo install -m 0755 libcontrolcan.so /usr/local/lib/libcontrolcan.so
-sudo ldconfig
-
-file /usr/local/lib/libcontrolcan.so
-ldd /usr/local/lib/libcontrolcan.so
-```
-
-也可以不写系统目录，把两者放在 `/opt/controlcan/include` 和 `/opt/controlcan/lib`，构建时加：
-
-```bash
-export CONTROLCAN_ROOT=/opt/controlcan
-```
-
-`weld_controller/CMakeLists.txt` 会明确检查头文件和库；缺一项就停止配置，避免链接到错误架构或到运行时才失败。
-
-## 8. 构建工作区
-
-```bash
-cd ~/x86_ros2_ws
+cd /home/mini/x86_ros2_ws
 source /opt/ros/humble/setup.bash
-export CMAKE_PREFIX_PATH="$HOME/scut_weld_sdk_install:$CMAKE_PREFIX_PATH"
-export LD_LIBRARY_PATH="$HOME/scut_weld_sdk_install/lib:$LD_LIBRARY_PATH"
-export CHISHINE_3D_CAMERA_SDK_ROOT="$HOME/x86_chishine_camera_test/vendor_sdk"
-
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --packages-select cimc --base-paths src
 source install/setup.bash
 ```
 
-CAN SDK 尚未就绪时，可先验证其他三个包：
+算法 SDK 的独立构建、安装和离线回归命令见[算法源码 README](x86_weld_seam_test/README.md)。另有独立 Git 仓库 `/home/mini/x86_weld_seam_test`，与本工作区 Git 仓库不是同一个仓库；修改前先确认正在编辑哪一份源码。不要为了刷新配置而删除整个 `build/`、`install/` 或 `log/`。
 
-```bash
-colcon build --symlink-install \
-  --packages-select cimc chishine_camera_ros2 weld_seam_perception \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release
-```
+## 不连接硬件时如何检查
 
-不建议日常执行 `rm -rf build install log`。只有 CMake 缓存确实污染时才在确认当前目录后清理。
+优先在独立 `ROS_DOMAIN_ID` 中只启动 `weld_seam_node`，向 `/camera/pointcloud_file` 发送历史 PLY 的绝对路径；这种测试不需要相机、ABB、焊机或电机，但**不要同时启动总 launch**。结果写入配置的 `output_directory`，重复输入会覆盖同名前缀结果。完整双终端命令已写在[焊缝 YAML 顶部注释](src/weld_seam_perception/config/weld_seam.yaml)和[测试手册](实际启动与分节点测试手册.md)。
 
-## 9. 运行数据目录
+主要观测：`/weld_task/status`、`/weld_seam/status`、`/handeye_bridge/status`、`/abb/raw_text`、`/abb/tx_status`、`/abb/task_timing`。`/abb/tx_text` 是准备发送的文本；`/abb/tx_status` 的 OK 仅表明本机 socket 写入；`TRAJECTORY_ACK` 才是 ABB 应用层确认，仍不代表机器人已运动。端到端计时从收到完整 `START_CAPTURE` 到轨迹 `sendall()` 返回，不含 ABB 端解析/执行。
 
-默认根目录：
+## 文档维护约定
 
-```text
-~/scut_weld_data/
-├── pointclouds/     # 相机 PLY
-└── weld_results/    # 算法 CSV 与调试 PLY
-```
-
-整体迁移到数据盘：
-
-```bash
-export SCUT_WELD_DATA_ROOT=/data/scut_weld
-mkdir -p "$SCUT_WELD_DATA_ROOT/pointclouds" \
-         "$SCUT_WELD_DATA_ROOT/weld_results"
-```
-
-运行数据不放进 `src` 或 `install/share`：ROS 安装空间可能只读，重新 `colcon build` 也不应覆盖生产数据。
-
-## 10. 推荐逐节点验收顺序
-
-> 本节包含面向后续硬件联调的节点命令，不是本轮现场测试的整套启动清单。下一次“只连接相机、不连接 ABB”的操作应直接执行 `order.txt` 第 9 节，不启动电机、焊机或 ABB 数据节点。
-
-当前工控机的 `~/.bashrc` 已自动加载 ROS Humble、工作区 overlay、焊缝 SDK、相机 SDK 和数据目录，正常打开的新交互终端可直接执行下列节点命令。以下环境命令只作为换机部署或非交互 shell 的兜底：
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/x86_ros2_ws/install/setup.bash
-export LD_LIBRARY_PATH="$HOME/scut_weld_sdk_install/lib:$LD_LIBRARY_PATH"
-```
-
-### 10.0 当前阶段一键测试 launch
-
-关闭实时查看器、释放相机后执行：
-
-```bash
-ros2 launch cimc camera_weld_handeye_test.launch.py
-```
-
-launch 同时启动相机、焊缝提取、手眼桥和任务协调节点，并在同一终端打印任务/算法/手眼状态以及下一条完整的 `/abb/trajectory_tcp`。节点就绪后，仍需另开终端人工发布一次 `START_CAPTURE`。
-
-ABB 双向收发联调（ABB 只存储/打印，禁止运动）使用：
-
-```bash
-ros2 launch cimc camera_weld_handeye_abb_test.launch.py
-```
-
-完整执行顺序和监视话题见 `order.txt` 第 13 节。
-
-这个 launch 直接读取主工作区中的以下文件，修改 YAML 参数后下次启动立即生效：
-
-```text
-src/chishine_camera_ros2/config/camera.yaml
-src/weld_seam_perception/config/weld_seam.yaml
-src/cimc/config/handeye_bridge.yaml
-src/cimc/config/weld_task_coordinator.yaml
-src/cimc/config/handeye_result20260723.yaml
-```
-
-手眼矩阵方向只修改 `handeye_bridge.yaml` 中的 `matrix_direction`；焊缝算法参数和 `path.mode=feature_points/rounded_features/adaptive_contour` 只修改 `weld_seam.yaml` 中的 `algorithm_overrides`。launch 只指定这些参数文件，不再用 launch 字典覆盖节点参数。如果工作区不在默认位置，可覆盖 `workspace_root:=<path>`。逐节点命令仍保留用于独立排障。
-
-### 10.1 电机节点
-
-```bash
-ros2 run cimc motor_control_node
-ros2 topic pub --once /cimc/motor_speed std_msgs/msg/Float32 "{data: 3.0}"
-ros2 topic pub --once /cimc/motor_speed std_msgs/msg/Float32 "{data: 0.0}"
-```
-
-### 10.2 ABB 数据节点
-
-```bash
-ros2 run cimc data_receiver_node --ros-args \
-  --params-file ~/x86_ros2_ws/src/cimc/config/data_receiver.yaml
-ros2 topic echo /abb/raw_text
-ros2 topic echo /abb/weld_point
-ros2 topic echo /abb/tx_text
-ros2 topic echo /abb/tx_status
-ros2 topic echo /abb/task_timing
-```
-
-`/abb/task_timing` 统计完整 `START_CAPTURE` 到轨迹 socket `sendall()` 返回的端到端耗时（ms），并提供当前进程内的成功样本数、平均值、最小值和最大值。它不包含 ABB 程序解析/存储时间。
-
-新工控机 IP 若不同，可命令行覆盖，不改源码：
-
-```bash
-ros2 run cimc data_receiver_node --ros-args \
-  -p listen_host:=192.168.3.100 \
-  -p abb_allowed_ip:=192.168.3.2 \
-  -p forward_ip:=192.168.3.5
-```
-
-### 10.3 焊机 USB-CAN 节点
-
-```bash
-ros2 run weld_controller weld_controller_node
-ros2 topic echo /weld/status
-ros2 topic echo /weld/feedback_raw
-```
-
-`weld_logic_node.cpp` 只保留为历史源码，不再构建，也没有新增中间“焊接大脑”节点。`data_receiver_node` 收到 192.168.3.5 的 JSONL v1 请求后，直接发布 `/weld/control`、`/weld/set_param_real` 和 `/cimc/motor_speed`。网络配置位于：
-
-```bash
-ros2 run cimc data_receiver_node --ros-args \
-  --params-file ~/x86_ros2_ws/src/cimc/config/data_receiver.yaml
-ros2 topic echo /third_party/status
-```
-
-当前没有 192.168.3.5 时，不模拟网络层，而是按 `order.txt` 第 12 节直接发布协议解析后应产生的三个底层话题。启动底层节点或发布这些话题可能操作真实焊机和电机，必须先完成独立安全验收。
-
-### 10.4 相机节点
-
-```bash
-ros2 run chishine_camera_ros2 chishine_camera_node --ros-args \
-  --params-file ~/x86_ros2_ws/src/chishine_camera_ros2/config/camera.yaml
-
-ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
-ros2 topic echo --once --qos-durability transient_local \
-  --qos-reliability reliable /camera/pointcloud_file
-```
-
-### 10.5 焊缝节点
-
-```bash
-ros2 run weld_seam_perception weld_seam_node --ros-args \
-  --params-file ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
-```
-
-如果 `auto_process=true`，相机成功发布 PLY 路径后会自动提取。也可人工把已有 PLY 路径发给算法节点：
-
-```bash
-ros2 topic pub --once /camera/pointcloud_file std_msgs/msg/String \
-  "{data: '/absolute/sample.ply'}"
-```
-
-或在收到路径但 `auto_process=false` 时触发最近一帧：
-
-```bash
-ros2 service call /weld_seam/extract_latest std_srvs/srv/Trigger "{}"
-```
-
-查看结果：
-
-```bash
-ros2 topic echo --once --qos-durability transient_local \
-  --qos-reliability reliable /weld_seam/result_csv
-ros2 topic echo --once --qos-durability transient_local \
-  --qos-reliability reliable /weld_seam/result_visualization
-ros2 topic echo /weld_seam/status
-ros2 topic echo --once --qos-durability transient_local \
-  --qos-reliability reliable /weld_seam/poses_camera_frame
-```
-
-### 10.6 任务协调节点
-
-该节点接收一条包含拍照时 TCP 位姿的命令，发布 `Base_from_TCP` 和单次轨迹授权，再调用相机服务：
-
-```bash
-ros2 run cimc weld_task_coordinator_node --ros-args \
-  -p weld_auto_process:=true \
-  -p require_capture_pose:=true \
-  -p capture_pose_unit:=mm \
-  -p base_frame_id:=robot_base
-```
-
-无 ABB 通信时，可直接向 `/abb/raw_text` 发布同格式测试消息。必须把占位符替换为示教器在**实际拍照静止位置**显示的数据：
-
-```bash
-ros2 topic pub --once /abb/raw_text std_msgs/msg/String \
-  "{data: 'START_CAPTURE:<X_mm>,<Y_mm>,<Z_mm>,<QW>,<QX>,<QY>,<QZ>'}"
-```
-
-### 10.7 手眼/ABB 桥接节点
-
-当前标定 YAML 没有记录矩阵方向，必须先确认标定软件输出的是 `TCP_from_Camera` 还是 `Camera_from_TCP`。以下示例只适用于前者，并保持禁止发送 ABB：
-
-```bash
-ros2 run cimc handeye_abb_bridge_node --ros-args \
-  -p matrix_file:="$HOME/x86_ros2_ws/src/cimc/config/handeye_result20260723.yaml" \
-  -p matrix_direction:=tcp_from_camera \
-  -p matrix_translation_unit:=mm \
-  -p output_frame_id:=robot_base \
-  -p require_capture_pose:=true \
-  -p require_task_armed:=true \
-  -p send_to_abb:=false
-```
-
-若文件实际为 `Camera_from_TCP`，必须把 `matrix_direction` 改成 `camera_from_tcp`。查看离线结果：
-
-```bash
-ros2 topic echo /weld_task/status
-ros2 topic echo /handeye_bridge/status
-ros2 topic echo --once --qos-durability transient_local \
-  --qos-reliability reliable /abb/trajectory_tcp
-```
-
-## 11. 相机到算法的独立排障流程（不插入本次主流程）
-
-只有在完整任务失败、需要隔离相机或算法问题时，才先启动 `weld_seam_node` 和 `chishine_camera_node`，再单独调用：
-
-```bash
-ros2 service call /camera/capture std_srvs/srv/Trigger "{}"
-```
-
-期望事件顺序：
-
-1. 相机完成软件触发并把非空 PLY 写到 `pointclouds/`；
-2. 发布 `/camera/pointcloud_file`；
-3. 焊缝节点收到路径，SDK 日志显示 `normal.mode=auto` 的复用或重算来源；
-4. `weld_results/` 生成 CSV、精确点 PLY、粉红十字可视化 PLY；
-5. 发布相机坐标系下 PoseArray 和 JSON 状态。
-
-这条命令会额外产生一帧和一次算法结果，因此正常现场主流程不执行它。
-
-## 12. 下一次现场无机械臂验证计划
-
-相机固定在机械臂末端，但本轮不连接 ABB TCP、不让程序控制机械臂。完整命令已按终端和顺序写入 `order.txt`，总体流程为：
-
-1. 启动 `x86_chishine_live_viewer`，用实时点云选择合适的静止拍照位置；默认显示完整点云，可按 `B` 初始化相机/PLY坐标系 XYZ ROI，实时调整后按 `K` 打印可复制到 `weld_seam.yaml` 的六个边界，按 `S` 保存 ROI 内完整点云。查看器和当前 ROS 相机 YAML 的深度范围统一为 `100–600 mm`。
-2. 按 `Q`、`Esc` 或 `Ctrl+C` 完全关闭查看器，释放相机独占连接。
-3. 启动 ROS 相机节点；它连接相机并等待软件触发，此时不主动生成 PLY。
-4. 启动焊缝节点并确认 `auto_process=true`；它等待新的 PLY 路径。
-5. 启动手眼桥，确认矩阵方向并保持 `send_to_abb=false`；再启动任务协调节点。
-6. 提前监听 `/weld_task/status`、`/weld_seam/status`、`/handeye_bridge/status` 和 `/abb/trajectory_tcp`，避免错过非保留状态。
-7. 从示教器再次读取该静止拍照位置的基坐标 TCP：必须确认显示参考系确实是机器人 Base；如果显示的是工件/用户坐标系，或 `wobj0/world` 与 Base 不重合，不能直接填入。XYZ 使用 mm，姿态转换为代码要求的 `qw,qx,qy,qz`。
-8. 向 `/abb/raw_text` 模拟发布一次 `START_CAPTURE`。协调节点触发唯一一次拍照；新 PLY 使焊缝节点自动提取一次，手眼桥随后输出 `/abb/trajectory_tcp`。
-9. 检查 PLY、CSV、可视化结果、相机系 PoseArray 和 `robot_base` PoseArray。位置和示教器 mm 对比时乘 1000；ROS 四元数显示顺序为 `x,y,z,w`。
-10. 只有在确认坐标、姿态、点顺序、可达性和安全间隙后，才由操作者在示教器上低速、单点、禁弧手动验证。ROS 不发送任何运动命令。
-
-这与真实任务从 `/abb/raw_text` 往后的节点链路一致。区别是本轮用 `ros2 topic pub` 代替 ABB TCP 和 `data_receiver_node`，因此尚未验证 ABB 网络接收、协议分帧、真实拍照时刻同步和返回发送。
-
-## 13. 坐标、姿态和手眼变换
-
-- 算法 CSV 的位置单位是 mm；四元数按 `qw,qx,qy,qz` 保存。
-- 焊缝 SDK 先生成相机坐标系 CSV；`weld_seam_node` 随即重新打开该 CSV，只读取 `x,y,z,qw,qx,qy,qz`，把位置从 mm 转成 m，并发布 `/weld_seam/poses_camera_frame`。
-- `handeye_abb_bridge_node` 不读取 CSV 文件，而是订阅上述 PoseArray，对其中全部位姿逐点执行手眼变换，再发布 `robot_base` 下的 `/abb/trajectory_tcp`。当前不会另外生成一份基坐标系 CSV。
-- 当未来设置 `send_to_abb=true` 时，桥接节点会把 `/abb/trajectory_tcp` 中全部点转回 mm，按 `qw,qx,qy,qz` 序列化到 `/abb/tx_text`；`data_receiver_node` 再通过 ABB TCP 连接发送。本轮保持 `false`，不会发送。
-- `/weld_seam/poses_camera_frame` 按 ROS REP-103 把位置乘 `0.001` 变为 m，四元数不缩放，`frame_id=camera_link`。
-- 相机 SDK 直接使用深度相机内参生成 PLY：`x=(u-cx)z/fx`、`y=(v-cy)z/fy`、`z=depth`。因此 PLY 原点是深度相机的理想光心，X 随图像列向右、Y 随图像行向下、Z 沿深度方向向前。
-- 当前采集关闭 RGB，生成点云时没有应用 Depth-to-RGB 外参；所以手眼标定矩阵必须对应这个**深度光学坐标系**。如果标定使用的是 RGB 光心、相机外壳坐标系或其他坐标系，必须补上相应固定外参，不能只把话题 `frame_id` 改成 `camera_link`。
-- 当前手眼节点按 eye-in-hand 链计算：`Base_from_Tool = Base_from_TCP_at_capture * TCP_from_Camera * Camera_from_Tool`。
-- SDK 2.4.0 默认仍使用 `orientation.tool_x_reference=workpiece_x`：保持算法 Tool Z 不变，将所选工件 `+X/-X` 投影到 Tool Z 的法平面作为 Tool X，再按右手系生成 Tool Y。方向由 `orientation.tool_x_points_along_positive_workpiece_x` 选择；`corner_bisector` 只用于回退旧行为。`rounded_features` 的圆角点和直线中点同样使用这套坐标系，不再采用自适应模式的逐点噪声切线坐标系。
-- 固定 Tool X 参考可减少绕焊枪自身轴的非工艺性滚转，但目标笛卡尔姿态并不等于唯一关节解，也不能单独保证可达；ABB 的关节限位、`robconf`、奇异点和碰撞仍需单独检查。
-- 当示教器数据确实是 `Base_from_TCP`、手眼矩阵方向正确、算法 Tool 与 ABB 当前枪尖 TCP 定义一致时，`/abb/trajectory_tcp` 的位置和姿态就是机器人基坐标系下的目标，`frame_id=robot_base`。
-- 如果示教器输出相对于工件/用户坐标系，必须先转换到 Base；代码当前不读取 ABB `wobjdata`，也不会自动完成这一步。
-- 如果标定矩阵相反，代码可通过 `camera_from_tcp` 自动求逆；如果实际是 eye-to-hand 固定相机，当前乘法链不适用。
-- 输出被标为 `robot_base` 不等于物理关系已经验证。矩阵文件目前没有保存 eye-in-hand/eye-to-hand、矩阵方向、相机光学帧、ABB tooldata、标定残差等来源信息。
-- 算法 PoseArray 目前没有保留 CSV 中的 `weld_enabled` 和四类焊点语义，不能直接作为自动焊接工艺序列。
-
-## 14. 开机运行前的安全边界
-
-1. 相机和算法节点只采集/计算/发布文件与位姿，不应直接驱动 ABB。
-2. `weld_logic_node.cpp` 仅作历史源码保留且不再构建；第三方协议直接映射现有焊机和电机话题。
-3. 在机械臂自动运行前，先离线确认粉红十字中心、四元数、手眼矩阵、枪尖 TCP、工件坐标以及凹角干涉余量。
-4. 本轮无 ABB/焊接执行验证不启动 `data_receiver_node`、`weld_controller_node` 或 `motor_control_node`。
-5. 手眼桥始终保持 `send_to_abb=false`；不能为了获得易读文本临时打开真实发送。
-6. 首次人工验证应低速、单点、空载、禁弧，并由操作者在示教器上逐点确认；本工作区当前不具备碰撞、关节限位或可达性规划能力。
-
-更多可复制命令见 `order.txt`；每个节点的完整接口见相应包内 README。
+- 根 README 说明**当前主链路**；[测试手册](实际启动与分节点测试手册.md)放可复制操作步骤；[接口说明](ROS2全部节点与接口说明.md)放 topic/单位/QoS；包内 README 放实现边界和参数。
+- `order.txt` 是现场命令备忘，可能含特定设备地址、ROI 或历史测试命令；不能代替上面的安全说明。
+- 第三方焊接协议、焊机、电机和 SDK 历史备份属于保留资料，默认不在当前总 launch 中启用。变更默认启动行为时，请同步更新上述文档，不要把历史试验结论写成当前保证。

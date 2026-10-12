@@ -1,6 +1,6 @@
 # weld_seam_perception 包说明
 
-该包是焊缝 SDK 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。构建时至少要求 SDK 2.4.8，启动日志中的 SDK 版本是实际运行版本；修改算法源码后仍须重新编译、安装 SDK 并重建本包。
+该包是焊缝 SDK 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接工作区内 `x86_weld_seam_test/install` 的 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。当前 CMake 要求 SDK 至少 2.4.10；启动日志中的版本才是实际加载的运行库版本。工作区源码版本与已安装库可能不同；修改算法源码后仍须重新编译、安装 SDK 并重建本包。
 
 ## 文件作用
 
@@ -8,7 +8,7 @@
 |---|---|
 | `src/weld_seam_node.cpp` | 输入路径、互斥调用 SDK、发布文件路径/JSON/PoseArray |
 | `config/weld_seam.yaml` | ROS 参数和算法 `key=value` 覆盖 |
-| `CMakeLists.txt` | 要求 `weld_seam_sdk >= 2.2` 并链接 `weld_seam::sdk` |
+| `CMakeLists.txt` | 从工作区 SDK 安装目录查找 `weld_seam_sdk >= 2.4.10` 并链接 `weld_seam::sdk` |
 | `package.xml` | rclcpp、String、Trigger、PoseArray 依赖 |
 
 ## ROS 2 接口
@@ -84,27 +84,25 @@ ROI、四类位置偏置、四类姿态等均可继续添加，不用重新编�
 
 三行只能启用一行。当前 YAML 使用 `rounded_features`，圆角目标弧长间距为 3 mm；首末已确认角各 1 点，内部完整圆角默认 5 点，确认角之间增加 1 个中点。若裁剪边界落在一段有充分实测支撑的直线上，还会增加实测边界焊接点及必要中点，而不是因为红缝超出角点便拒绝整条轨迹；CSV 以 `measured_boundary_seam_endpoint` 标记。可靠实测点优先；小空洞拟合点以 CSV 的 `point_source=modeled_small_hole_from_adjacent_lines` 和结果 PLY 的亮绿色十字星标记，不能当作实测点。内部四类跳类、目标顺序回退、跨度过大的空洞仍拒绝向手眼或 ABB 发布。三种模式都受含安全点在内的 100 点上限保护；ROS 仍按列名读取 `x,y,z,qw,qx,qy,qz`，`raw_*` 和 `point_source` 诊断列不改变手眼或 ABB 协议。
 
-ROI 是相机坐标下的额外裁剪，即使输入 PLY 已裁剪也会再次生效。当前 YAML 的 X/Y/Z 均为 `-inf/inf`，默认不裁剪；`roi.enable=true` 是为了以后按拍照位置填写边界即可生效，并非固定一个 X 区间。不同拍照位置不能假定共用同一 ROI：可先离线裁剪 PLY 并检查结果，或在该次运行前把相应边界写入 YAML。注意手工裁剪某个 PLY 不会自动裁剪下一次 ROS 相机节点生成的文件。全范围输入若仍包含视野外缘的多余红缝，首末覆盖保护可能拒绝发布轨迹；这不是 ROS 节点启动失败，不应只靠放大外推阈值消除。每次改 ROI 后先核对角点顺序和结果 PLY。
+ROI 是相机坐标下的额外裁剪，即使输入 PLY 已裁剪也会再次生效。**当前 YAML 已启用一次现场拍照位对应的固定 X/Y 边界；Z 仍为全范围**。这些数字不是通用默认 ROI，换拍照位或工件摆放后须重新复核。可先离线裁剪 PLY 并检查结果，或在人工标定窗口中更新对应边界；仅裁剪某个历史 PLY 不会自动改变下一次 ROS 相机产生的文件。全范围输入若仍包含视野外缘的多余红缝，首末覆盖保护可能拒绝发布轨迹；这不是 ROS 节点启动失败，不应只靠放大外推阈值消除。每次改 ROI 后先核对角点顺序和结果 PLY。精确当前值始终以 [`config/weld_seam.yaml`](config/weld_seam.yaml) 为准。
 
 ## 构建
 
-先安装 SDK：
+先从**本工作区副本**构建并安装 SDK；独立仓库 `~/x86_weld_seam_test` 和旧目录 `~/scut_weld_sdk_install` 不是本包当前的 CMake 搜索目标：
 
 ```bash
-cd ~/x86_weld_seam_test
+cd /home/mini/x86_ros2_ws/x86_weld_seam_test
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
-cmake --install build --prefix "$HOME/scut_weld_sdk_install"
+cmake --install build --prefix /home/mini/x86_ros2_ws/x86_weld_seam_test/install
 ```
 
 再构建本包：
 
 ```bash
-export CMAKE_PREFIX_PATH="$HOME/scut_weld_sdk_install:$CMAKE_PREFIX_PATH"
-export LD_LIBRARY_PATH="$HOME/scut_weld_sdk_install/lib:$LD_LIBRARY_PATH"
 source /opt/ros/humble/setup.bash
-cd ~/x86_ros2_ws
-colcon build --symlink-install --packages-select weld_seam_perception \
+cd /home/mini/x86_ros2_ws
+colcon build --packages-select weld_seam_perception --base-paths src \
   --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 ```
@@ -115,7 +113,8 @@ source install/setup.bash
 ros2 run weld_seam_perception weld_seam_node --ros-args \
   --params-file ~/x86_ros2_ws/src/weld_seam_perception/config/weld_seam.yaml
 
-ros2 topic pub --once /camera/pointcloud_file std_msgs/msg/String \
+ros2 topic pub --once --qos-durability transient_local \
+  --qos-reliability reliable /camera/pointcloud_file std_msgs/msg/String \
   "{data: '/absolute/sample.ply'}"
 ```
 
@@ -128,6 +127,6 @@ SDK 当前按一次一份大点云同步运行。节点用 `try_lock` 防止第�
 - CSV：位置为相机/PLY 坐标系的 mm，四元数同属相机坐标系；
 - PoseArray：位置换算为 m，`frame_id=camera_link`；
 - 本节点未应用手眼矩阵，也未直接向 ABB 发送目标；
-- 后续应由独立节点把 `T_base_camera * T_camera_tcp`（具体乘法链取决于标定方式）转换到 ABB 所需坐标系，并再次验证工具 TCP/枪尖方向。
+- 后续由 `handeye_abb_bridge_node` 根据拍照时 `Base←TCP` 与配置的 `TCP←Camera` 执行变换，再次验证工具 TCP/枪尖方向；本节点只发布相机系结果。
 
 这样可让“视觉识别”“标定变换”“机器人通信”三类错误分别定位，不把某台机器人的标定常数绑定进通用焊缝 SDK。

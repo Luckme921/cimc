@@ -1,5 +1,7 @@
 # 任务协调与手眼 ABB 桥接节点
 
+> 本文保留协调器与手眼桥的实现细节和历史独立测试步骤。**当前主入口**是 [`camera_weld_operator_abb.launch.py`](launch/camera_weld_operator_abb.launch.py)，人工/固定模式及安全前提请先看[工作区 README](../../README.md)和[人工标定流程](人工标定与自动运行.md)。本文若出现旧的 SDK 版本、旧 ROI 或“下一次现场”计划，不能代替当前 `src` YAML 与节点启动日志。
+
 ## 1. 新增的完整数据链
 
 ```text
