@@ -11,6 +11,8 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -83,41 +85,162 @@ def finite_or_infinity(value):
     return format(number, '.9g')
 
 
-def plot_preview(result_ply, rows):
-    """Visualize sampled cloud/red seam plus ordered, named target points."""
-    import numpy as np
-    import matplotlib.pyplot as plt
+def make_highlight_ply(result_ply, row, target_ply):
+    """Copy SDK result and add one cyan cross without altering existing vertices."""
+    data = result_ply.read_bytes()
+    end = data.find(b'end_header\n')
+    if end < 0 or end > 16384:
+        raise ValueError('SDK 结果 PLY 缺少有效头部')
+    head_end = end + len(b'end_header\n')
+    header = data[:head_end]
+    if b'format binary_little_endian 1.0' not in header:
+        raise ValueError('高亮只支持 SDK 的二进制小端 result.ply')
+    required = (b'property float x\n', b'property float y\n',
+                b'property float z\n', b'property uchar red\n',
+                b'property uchar green\n', b'property uchar blue\n')
+    if not all(field in header for field in required):
+        raise ValueError('SDK 结果 PLY 顶点格式与预期不符，未生成高亮文件')
+    match = re.search(rb'(?m)^element vertex (\d+)\r?$', header)
+    if not match:
+        raise ValueError('SDK 结果 PLY 缺少顶点数量')
+    count = int(match.group(1))
+    vertex_end = head_end + count * 15  # float32 XYZ + uint8 RGB
+    if vertex_end > len(data):
+        raise ValueError('SDK 结果 PLY 顶点数据不完整')
+    center = tuple(float(row[key]) for key in ('x', 'y', 'z'))
+    marker = bytearray()
+    # Five-millimetre cyan XYZ cross, sampled densely enough for PLY viewers.
+    for axis in range(3):
+        for step in range(-20, 21):
+            point = list(center)
+            point[axis] += step * 0.25
+            marker.extend(struct.pack('<fffBBB', *point, 0, 255, 255))
+    updated_header = (header[:match.start(1)] +
+                      str(count + len(marker) // 15).encode('ascii') +
+                      header[match.end(1):])
+    target_ply.write_bytes(
+        updated_header + data[head_end:vertex_end] + marker + data[vertex_end:])
+    return target_ply
 
-    with result_ply.open('rb') as stream:
-        header = bytearray()
-        while not header.endswith(b'end_header\n'):
-            chunk = stream.readline()
-            if not chunk or len(header) > 16384:
-                raise ValueError('结果 PLY 头无效')
-            header.extend(chunk)
-        head = header.decode('ascii')
-        if 'format binary_little_endian 1.0' not in head:
-            raise ValueError('预览目前只支持 SDK 输出的二进制 PLY')
-        count = int(re.search(r'element vertex (\d+)', head).group(1))
-        cloud = np.fromfile(stream, dtype=np.dtype([
-            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-            ('r', 'u1'), ('g', 'u1'), ('b', 'u1')]), count=count)
-    fig = plt.figure(figsize=(13, 7))
-    ax = fig.add_subplot(111, projection='3d')
-    sample = cloud[::max(1, len(cloud) // 25000)]
-    ax.scatter(sample['x'], sample['y'], sample['z'], c='0.7', s=0.2, alpha=0.3)
-    red = cloud[(cloud['r'] > 150) & (cloud['r'] > cloud['g'] * 1.5)
-                & (cloud['r'] > cloud['b'] * 1.5)]
-    red = red[::max(1, len(red) // 12000)]
-    ax.scatter(red['x'], red['y'], red['z'], c='red', s=1, alpha=0.7)
-    for row in rows:
-        x, y, z = (float(row[k]) for k in ('x', 'y', 'z'))
-        ax.scatter([x], [y], [z], c='magenta', s=35)
-        ax.text(x, y, z, f"P{int(row['order']) + 1} {row['position_offset_group']}",
-                fontsize=7)
-    ax.set(xlabel='camera X / mm', ylabel='camera Y / mm', zlabel='camera Z / mm')
-    ax.set_title(f'Offline review: {len(rows)} points; close window to return to setup')
-    plt.show(block=False)
+
+class PreviewWindow:
+    """Keep point-to-YAML mapping separate from the uncluttered SDK PLY."""
+
+    def __init__(self, parent, result_ply, rows):
+        self.result_ply = result_ply
+        self.rows = rows
+        self.window = tk.Toplevel(parent)
+        self.window.title(f'焊缝结果核对：{len(rows)} 个点')
+        self.window.geometry('1280x650')
+        frame = ttk.Frame(self.window, padding=10)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text=(
+            '原始 result.ply 保持算法生成效果；下表列出点序号与 YAML 偏移组。'
+            '选中一行可生成仅高亮该点的点云（青色十字）。'),
+            wraplength=1200).pack(anchor='w')
+        ttk.Label(frame, text=str(result_ply), wraplength=1200).pack(anchor='w')
+        controls = ttk.Frame(frame)
+        controls.pack(fill='x', pady=6)
+        ttk.Label(controls, text='按偏移组筛选：').pack(side='left')
+        self.group = tk.StringVar(value='全部')
+        groups = ['全部'] + sorted({row['position_offset_group'] for row in rows})
+        selector = ttk.Combobox(controls, textvariable=self.group, values=groups,
+                                width=26, state='readonly')
+        selector.pack(side='left')
+        selector.bind('<<ComboboxSelected>>', lambda _event: self.populate())
+        ttk.Button(controls, text='在 VS Code 打开原始 result.ply',
+                   command=lambda: self.open_ply(result_ply)).pack(side='left', padx=8)
+        ttk.Button(controls, text='高亮选中点并在 VS Code 打开',
+                   command=self.highlight_selected).pack(side='left', padx=8)
+        ttk.Button(controls, text='复制原始 PLY 路径',
+                   command=self.copy_path).pack(side='left', padx=8)
+
+        columns = ('point', 'feature', 'group', 'offset', 'source', 'camera', 'workpiece')
+        table_frame = ttk.Frame(frame)
+        table_frame.pack(fill='both', expand=True)
+        self.table = ttk.Treeview(table_frame, columns=columns, show='headings',
+                                  selectmode='browse')
+        headings = ('点序号', '特征类型', 'YAML 偏移组', '实际偏移 X/Y/Z mm',
+                    '点来源', '相机 XYZ mm', '工件 XYZ mm')
+        widths = (65, 290, 190, 160, 250, 175, 175)
+        for column, title, width in zip(columns, headings, widths):
+            self.table.heading(column, text=title)
+            self.table.column(column, width=width, minwidth=50, stretch=True)
+        horizontal = ttk.Scrollbar(table_frame, orient='horizontal',
+                                   command=self.table.xview)
+        horizontal.pack(side='bottom', fill='x')
+        self.table.pack(side='left', fill='both', expand=True)
+        scrollbar = ttk.Scrollbar(table_frame, orient='vertical', command=self.table.yview)
+        scrollbar.pack(side='right', fill='y')
+        self.table.configure(yscrollcommand=scrollbar.set,
+                             xscrollcommand=horizontal.set)
+        self.table.bind('<<TreeviewSelect>>', self.show_selection)
+        self.detail = tk.StringVar(value='选择一行，查看该点对应的 YAML 参数名。')
+        ttk.Label(frame, textvariable=self.detail, wraplength=1200).pack(
+            fill='x', pady=6)
+        self.populate()
+
+    def populate(self):
+        self.table.delete(*self.table.get_children())
+        for row in self.rows:
+            if self.group.get() not in ('全部', row['position_offset_group']):
+                continue
+            order = int(row['order'])
+            values = (
+                f'P{order + 1}', row['feature_type'], row['position_offset_group'],
+                '/'.join(row[f'applied_offset_workpiece_{axis}'] for axis in 'xyz'),
+                row['point_source'],
+                '/'.join(row[axis] for axis in 'xyz'),
+                '/'.join(row[f'workpiece_{axis}'] for axis in 'xyz'),
+            )
+            self.table.insert('', 'end', iid=str(order), values=values)
+
+    def selected_row(self):
+        selected = self.table.selection()
+        if not selected:
+            raise ValueError('请先在表格里选中一个点')
+        order = int(selected[0])
+        return next(row for row in self.rows if int(row['order']) == order)
+
+    def show_selection(self, _event=None):
+        try:
+            row = self.selected_row()
+        except ValueError:
+            return
+        group = row['position_offset_group']
+        self.detail.set(
+            f"P{int(row['order']) + 1} → {row['feature_type']}；"
+            f"对应 YAML：offset.{group}.x / .y / .z；"
+            f"来源：{row['point_source']}。偏移作用于工件坐标系，不是相机 XYZ。")
+
+    def copy_path(self):
+        self.window.clipboard_clear()
+        self.window.clipboard_append(str(self.result_ply))
+        self.detail.set('已复制原始 result.ply 路径；可直接粘贴到 VS Code 打开。')
+
+    def open_ply(self, path):
+        code = shutil.which('code')
+        if not code:
+            messagebox.showinfo('请手动打开 PLY', f'未找到 VS Code 命令，请打开：\n{path}',
+                                parent=self.window)
+            return
+        try:
+            subprocess.Popen([code, '--reuse-window', str(path)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            messagebox.showerror('打开 PLY 失败', str(exc), parent=self.window)
+
+    def highlight_selected(self):
+        try:
+            row = self.selected_row()
+            order = int(row['order'])
+            target = self.result_ply.with_name(
+                f'{self.result_ply.stem}_highlight_P{order + 1}.ply')
+            make_highlight_ply(self.result_ply, row, target)
+            self.open_ply(target)
+            self.detail.set(f'P{order + 1} 已用青色十字高亮；原始 result.ply 未修改。')
+        except Exception as exc:
+            messagebox.showerror('高亮失败', str(exc), parent=self.window)
 
 
 class SetupWindow:
@@ -135,6 +258,7 @@ class SetupWindow:
         self.viewer_running = False
         self.preview_signature = None
         self.preview_rows = None
+        self.preview_window = None
         self.approved = False
         self.root = tk.Tk()
         self.root.title('焊缝任务启动前确认（仅本次启动一次）')
@@ -161,7 +285,7 @@ class SetupWindow:
         self.vars['path.mode'] = tk.StringVar(value=self.original.get('path.mode', 'feature_points'))
         ttk.Combobox(outer, textvariable=self.vars['path.mode'], values=MODES,
                      width=22, state='readonly').grid(row=10, column=1, sticky='w')
-        ttk.Label(outer, text='偏移 mm：工件 X / Y / Z；预览点标签显示对应组').grid(
+        ttk.Label(outer, text='偏移 mm：工件 X / Y / Z；预览表格显示每个点对应的参数组').grid(
             row=11, column=0, columnspan=5, sticky='w')
         for index, (group, defaults) in enumerate(GROUP_DEFAULTS.items(), 12):
             ttk.Label(outer, text=group).grid(row=index, column=0, sticky='w')
@@ -170,7 +294,7 @@ class SetupWindow:
                 self.vars[key] = tk.StringVar(value=self.original.get(key, str(default)))
                 ttk.Entry(outer, textvariable=self.vars[key], width=12).grid(
                     row=index, column=col, sticky='w')
-        ttk.Button(outer, text='离线预览并标出点位/偏移组', command=self.preview).grid(
+        ttk.Button(outer, text='离线生成原始结果 PLY 与点位对照表', command=self.preview).grid(
             row=23, column=0, columnspan=2, sticky='w')
         ttk.Button(outer, text='确认配置，启动自动链路', command=self.approve).grid(
             row=23, column=2, columnspan=2, sticky='w')
@@ -278,11 +402,15 @@ class SetupWindow:
                 rows = list(csv.DictReader(stream))
             if not 1 <= len(rows) <= 100:
                 raise ValueError(f'点数 {len(rows)} 超过 ABB 的 100 点限制或为空')
+            result_ply = self.session / f'{prefix}_result.ply'
+            if self.preview_window is not None and self.preview_window.window.winfo_exists():
+                self.preview_window.window.destroy()
+            self.preview_window = PreviewWindow(self.root, result_ply, rows)
             self.preview_signature = self.signature(changes)
             self.preview_rows = rows
             self.status.set(f'预览成功：{len(rows)} 点，耗时 {1000 * (time.perf_counter()-started):.1f} ms；'
-                            f'结果 {self.session}。关闭图窗后可继续调整。')
-            plot_preview(self.session / f'{prefix}_result.ply', rows)
+                            f'原始 result.ply：{result_ply}；表格可按偏移组筛选并单点高亮。')
+            self.preview_window.open_ply(result_ply)
         except Exception as exc:
             self.preview_signature = None
             messagebox.showerror('离线预览失败', str(exc))
