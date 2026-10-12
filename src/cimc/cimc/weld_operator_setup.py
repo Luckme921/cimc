@@ -19,6 +19,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import numpy as np
 import yaml
 
 
@@ -57,6 +58,8 @@ WELD_COMMON = (
     ('orientation.recessed_left.work_angle_deg', '凹角左工作角 / °', '45'),
     ('orientation.recessed_right.work_angle_deg', '凹角右工作角 / °', '45'),
 )
+HANDEYE_FIELDS = ('matrix_file', 'matrix_key', 'matrix_direction',
+                  'matrix_translation_unit')
 
 
 def camera_save_directory(camera_params):
@@ -150,6 +153,52 @@ def replace_camera_parameters(config_text, changes):
     if any(float(parsed[key]) != float(value) for key, value in changes.items()):
         raise ValueError('相机配置写入校验失败')
     return result
+
+
+def replace_handeye_parameters(config_text, changes):
+    """Edit only selected bridge scalars; the matrix file itself is never written."""
+    original = yaml.safe_load(config_text)['handeye_abb_bridge_node']['ros__parameters']
+    if set(changes) - (set(HANDEYE_FIELDS) & original.keys()):
+        raise ValueError('手眼配置包含未知或缺失的参数')
+    lines = config_text.splitlines(keepends=True)
+    found = set()
+    for index, line in enumerate(lines):
+        match = re.match(r'^(    )([a-z_]+):(.*?)(\r?\n)?$', line)
+        if match and match.group(2) in changes:
+            key = match.group(2)
+            if key in found:
+                raise ValueError(f'手眼配置参数重复：{key}')
+            found.add(key)
+            lines[index] = f'{match.group(1)}{key}: {json.dumps(changes[key])}{match.group(4) or ""}'
+    if found != set(changes):
+        raise ValueError(f'手眼配置未找到参数行：{sorted(set(changes) - found)}')
+    result = ''.join(lines)
+    parsed = yaml.safe_load(result)['handeye_abb_bridge_node']['ros__parameters']
+    if any(parsed[key] != value for key, value in changes.items()):
+        raise ValueError('手眼配置写入校验失败')
+    return result
+
+
+def inspect_handeye_matrix(path, key):
+    """Use the same rigid-transform validity limits as the bridge node."""
+    text = Path(path).read_text(encoding='utf-8')
+    match = re.search(
+        rf'{re.escape(key)}\s*:\s*!!opencv-matrix.*?data\s*:\s*\[([^]]+)\]',
+        text, flags=re.DOTALL)
+    if not match:
+        raise ValueError(f'矩阵文件中未找到 OpenCV 键 {key}')
+    values = [float(value) for value in re.findall(
+        r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?', match.group(1))]
+    if len(values) != 16:
+        raise ValueError(f'矩阵必须有 16 个数，实际 {len(values)} 个')
+    matrix = np.asarray(values, dtype=float).reshape(4, 4)
+    rotation = matrix[:3, :3]
+    if (not np.all(np.isfinite(matrix)) or
+            not np.allclose(matrix[3], [0, 0, 0, 1], atol=1.0e-5) or
+            not np.allclose(rotation.T @ rotation, np.eye(3), atol=5.0e-3) or
+            np.linalg.det(rotation) < 0.99):
+        raise ValueError('矩阵不是有效的右手刚体变换；禁止启动手眼桥接')
+    return matrix, hashlib.sha256(text.encode()).hexdigest()
 
 
 def finite_or_infinity(value):
@@ -318,15 +367,27 @@ class PreviewWindow:
 
 
 class SetupWindow:
-    def __init__(self, workspace, config_path, camera_path):
+    def __init__(self, workspace, config_path, camera_path, handeye_path=None):
         self.workspace = workspace
         self.config_path = config_path
         self.camera_path = camera_path
+        self.handeye_path = (handeye_path if handeye_path is not None else
+                             workspace / 'src/cimc/config/handeye_bridge.yaml')
         self.original_text = config_path.read_text(encoding='utf-8')
         self.original_hash = hashlib.sha256(self.original_text.encode()).hexdigest()
         self.original = active_overrides(self.original_text)
         self.camera_original_text = camera_path.read_text(encoding='utf-8')
         self.camera_hash = hashlib.sha256(self.camera_original_text.encode()).hexdigest()
+        self.handeye_original_text = self.handeye_path.read_text(encoding='utf-8')
+        self.handeye_hash = hashlib.sha256(self.handeye_original_text.encode()).hexdigest()
+        self.handeye_params = yaml.safe_load(self.handeye_original_text)[
+            'handeye_abb_bridge_node']['ros__parameters']
+        try:
+            _, self.initial_matrix_hash = inspect_handeye_matrix(
+                self.handeye_params['matrix_file'], self.handeye_params['matrix_key'])
+        except (ValueError, OSError):
+            # Let the operator select a repaired file in the calibration tab.
+            self.initial_matrix_hash = None
         self.session = workspace / 'operator_sessions' / time.strftime('%Y%m%d_%H%M%S')
         self.session.mkdir(parents=True, exist_ok=True)
         self.manifest = self.session / 'viewer_snapshot.yaml'
@@ -384,12 +445,16 @@ class SetupWindow:
             self.vars[key] = tk.StringVar(value=self.original.get(key, default))
         self.camera_vars = {key: tk.StringVar(value=str(self.camera_params[key]))
                             for key, _label in CAMERA_FIELDS}
+        self.handeye_vars = {key: tk.StringVar(value=str(self.handeye_params[key]))
+                             for key in HANDEYE_FIELDS}
+        self.matrix_verified = tk.BooleanVar(value=False)
+        self.verified_matrix_digest = None
 
         outer = ttk.Frame(self.root, padding=18)
         outer.pack(fill='both', expand=True)
         ttk.Label(outer, text='华南理工大学智能焊接实验室', style='Brand.TLabel').pack(anchor='w')
         ttk.Label(outer, text='焊缝任务启动前确认', style='Title.TLabel').pack(anchor='w', pady=(2, 0))
-        ttk.Label(outer, text='① 选择点云 / ROI  →  ② 调整算法与偏移  →  ③ 离线预览  →  ④ 确认后自动处理多条 ABB 请求',
+        ttk.Label(outer, text='① 点云与相机  →  ② 焊缝参数  →  ③ 手眼标定复核  →  ④ 预览并确认  →  运行状态窗',
                   style='Muted.TLabel').pack(anchor='w', pady=(3, 8))
         ttk.Label(outer, text='安全边界：ABB TCP 可先连接；确认前拒绝拍照指令，不缓存旧机器人位姿。',
                   style='Safety.TLabel').pack(anchor='w', pady=(0, 12))
@@ -398,10 +463,12 @@ class SetupWindow:
         tabs.pack(fill='both', expand=True)
         capture_tab = ttk.Frame(tabs, padding=16)
         offset_tab = ttk.Frame(tabs, padding=16)
+        handeye_tab = ttk.Frame(tabs, padding=16)
         review_tab = ttk.Frame(tabs, padding=16)
         tabs.add(capture_tab, text='  1  点云与 ROI  ')
         tabs.add(offset_tab, text='  2  算法与点位偏移  ')
-        tabs.add(review_tab, text='  3  复核与启动  ')
+        tabs.add(handeye_tab, text='  3  手眼标定  ')
+        tabs.add(review_tab, text='  4  复核与启动  ')
 
         capture_pages = ttk.Notebook(capture_tab)
         capture_pages.pack(fill='both', expand=True)
@@ -487,6 +554,44 @@ class SetupWindow:
         ttk.Label(point_page, text='离线算法预览使用当前焊缝参数；相机参数用于实时点云预览。两种预览都不写正式 YAML。',
                   style='Muted.TLabel').pack(anchor='w', pady=(10, 0))
 
+        matrix_box = ttk.LabelFrame(handeye_tab, text='标定文件与变换约定 · handeye_bridge.yaml', padding=12)
+        matrix_box.pack(fill='x')
+        for row, (key, label) in enumerate((
+                ('matrix_file', 'OpenCV 标定矩阵文件'),
+                ('matrix_key', '矩阵键名'),
+                ('matrix_direction', '矩阵方向'),
+                ('matrix_translation_unit', '矩阵平移单位'))):
+            ttk.Label(matrix_box, text=label).grid(row=row, column=0, sticky='w', pady=7)
+            if key in ('matrix_direction', 'matrix_translation_unit'):
+                choices = (('tcp_from_camera', 'camera_from_tcp') if key == 'matrix_direction'
+                           else ('mm', 'm'))
+                widget = ttk.Combobox(matrix_box, textvariable=self.handeye_vars[key],
+                                      values=choices, width=28, state='readonly')
+            else:
+                widget = ttk.Entry(matrix_box, textvariable=self.handeye_vars[key],
+                                   width=64 if key == 'matrix_file' else 28)
+            widget.grid(row=row, column=1, sticky='w', padx=(14, 8), pady=7)
+            if key == 'matrix_file':
+                ttk.Button(matrix_box, text='选择文件', command=self.pick_matrix).grid(
+                    row=row, column=2, sticky='w')
+        ttk.Label(handeye_tab, text=(
+            'tcp_from_camera：TCP ← Camera；camera_from_tcp：Camera ← TCP，桥接节点会求逆。'
+            '只改变方向并不会重新标定，位置与姿态都可能明显错误。'),
+            style='Safety.TLabel', wraplength=920).pack(anchor='w', pady=(12, 6))
+        self.matrix_info = tk.StringVar()
+        ttk.Label(handeye_tab, textvariable=self.matrix_info, font=('DejaVu Sans Mono', 10),
+                  wraplength=920).pack(anchor='w', fill='x', pady=(5, 8))
+        ttk.Label(handeye_tab, text=(
+            f'输出坐标系：{self.handeye_params.get("output_frame_id")}；'
+            f'发送 ABB：{self.handeye_params.get("send_to_abb")}；'
+            f'最多点数：{self.handeye_params.get("max_trajectory_points")}。'
+            '这三项及矩阵文件数值在本窗口只读，防止误操作。'),
+            style='Muted.TLabel', wraplength=920).pack(anchor='w')
+        ttk.Checkbutton(handeye_tab,
+                        text='若修改标定文件、方向或单位：我已核对 TCP/相机坐标系和矩阵来源',
+                        variable=self.matrix_verified, command=self.verify_matrix).pack(
+            anchor='w', pady=(15, 0))
+
         ttk.Label(review_tab, text='复核当前输入', style='Title.TLabel').pack(anchor='w')
         self.pending = tk.StringVar()
         ttk.Label(review_tab, textvariable=self.pending, wraplength=930).pack(
@@ -529,32 +634,98 @@ class SetupWindow:
             variable.trace_add('write', self.mark_changed)
         for variable in self.camera_vars.values():
             variable.trace_add('write', self.mark_changed)
+        for variable in self.handeye_vars.values():
+            variable.trace_add('write', self.mark_handeye_changed)
+        self.update_matrix_info()
         self.update_review()
 
     def mark_changed(self, *_args):
         self.preview_signature = None
         self.update_review()
 
+    def mark_handeye_changed(self, *_args):
+        self.matrix_verified.set(False)
+        self.verified_matrix_digest = None
+        self.preview_signature = None
+        self.update_matrix_info()
+        self.update_review()
+
+    def verify_matrix(self):
+        if self.matrix_verified.get():
+            try:
+                _values, _matrix, self.verified_matrix_digest = self.handeye_values()
+            except (ValueError, OSError) as exc:
+                self.matrix_verified.set(False)
+                self.verified_matrix_digest = None
+                messagebox.showerror('手眼矩阵不可用', str(exc), parent=self.root)
+        else:
+            self.verified_matrix_digest = None
+        self.update_review()
+
+    def pick_matrix(self):
+        name = filedialog.askopenfilename(
+            title='选择手眼标定 OpenCV YAML',
+            filetypes=[('YAML 标定矩阵', '*.yaml *.yml'), ('所有文件', '*.*')],
+            parent=self.root)
+        if name:
+            self.handeye_vars['matrix_file'].set(name)
+
+    def handeye_values(self):
+        values = {key: var.get().strip() for key, var in self.handeye_vars.items()}
+        if not re.fullmatch(r'[A-Za-z_]\w*', values['matrix_key']):
+            raise ValueError('矩阵键名只能使用字母、数字和下划线')
+        if values['matrix_direction'] not in ('tcp_from_camera', 'camera_from_tcp'):
+            raise ValueError('手眼矩阵方向必须明确选择 TCP←Camera 或 Camera←TCP')
+        if values['matrix_translation_unit'] not in ('mm', 'm'):
+            raise ValueError('手眼矩阵平移单位只能选择 mm 或 m')
+        matrix_path = Path(values['matrix_file']).expanduser()
+        if not matrix_path.is_absolute():
+            matrix_path = self.workspace / matrix_path
+        matrix_path = matrix_path.resolve(strict=True)
+        values['matrix_file'] = str(matrix_path)
+        matrix, digest = inspect_handeye_matrix(matrix_path, values['matrix_key'])
+        return values, matrix, digest
+
+    def handeye_changes(self):
+        values, matrix, digest = self.handeye_values()
+        changes = {key: value for key, value in values.items()
+                   if value != str(self.handeye_params[key])}
+        return changes, matrix, digest
+
+    def update_matrix_info(self):
+        try:
+            values, matrix, _digest = self.handeye_values()
+            lines = ['已验证右手刚体矩阵（未改写矩阵文件）：']
+            lines.extend('  '.join(f'{number: .6f}' for number in row) for row in matrix)
+            lines.append(f'平移 {matrix[:3, 3].tolist()} {values["matrix_translation_unit"]}；'
+                         f'解释为 {values["matrix_direction"]}。')
+            self.matrix_info.set('\n'.join(lines))
+        except (ValueError, OSError) as exc:
+            self.matrix_info.set(f'标定矩阵不可用：{exc}')
+
     def update_review(self):
         try:
             changes = self.changes()
             camera_changes = self.camera_changes()
+            handeye_changes, _matrix, matrix_digest = self.handeye_changes()
         except (ValueError, KeyError, OSError) as exc:
             self.pending.set(f'输入尚未有效：{exc}')
             self.approve_button.configure(state='disabled')
             return
-        if changes or camera_changes:
+        if changes or camera_changes or handeye_changes:
             weld_names = '、'.join(changes) if changes else '无'
             camera_names = '、'.join(camera_changes) if camera_changes else '无'
             self.pending.set(
                 f'相机待写入 {len(camera_changes)} 项：{camera_names}\n'
                 f'焊缝待写入 {len(changes)} 项：{weld_names}\n'
+                f'手眼待写入 {len(handeye_changes)} 项：{", ".join(handeye_changes) if handeye_changes else "无"}\n'
                 '只有最终确认后才写入相应 src 配置 YAML。')
         else:
             self.pending.set('当前输入与启动时两份 YAML 一致；确认时不会重写配置文件。')
         preview_needed = bool(changes or self.ply is not None)
         try:
-            preview_current = self.preview_signature == self.signature(changes, camera_changes)
+            preview_current = self.preview_signature == self.signature(
+                changes, camera_changes, handeye_changes, matrix_digest)
         except OSError as exc:
             self.pending.set(f'已选点云文件不可用：{exc}')
             self.approve_button.configure(state='disabled')
@@ -563,6 +734,15 @@ class SetupWindow:
             self.approve_button.configure(state='disabled')
             self.preview_info.set('当前输入尚未通过离线预览；请先用最新值生成结果，再确认。')
             self.warning_info.set('')
+        elif not handeye_changes and matrix_digest != self.initial_matrix_hash:
+            self.approve_button.configure(state='disabled')
+            self.preview_info.set('矩阵文件在窗口打开后发生变化；请重新启动并复核标定。')
+            self.warning_info.set('')
+        elif handeye_changes and (not self.matrix_verified.get() or
+                                 self.verified_matrix_digest != matrix_digest):
+            self.approve_button.configure(state='disabled')
+            self.preview_info.set('手眼参数已修改；请先核对矩阵文件、方向和单位，再勾选标定确认。')
+            self.warning_info.set('离线焊缝预览不验证手眼标定方向或机器人可达性。')
         else:
             self.approve_button.configure(state='normal')
             if preview_current and self.preview_rows is not None:
@@ -719,14 +899,16 @@ class SetupWindow:
         self.preview_window = PreviewWindow(self.root, item['result_ply'], item['rows'])
         self.preview_window.open_ply(item['result_ply'])
 
-    def signature(self, changes, camera_changes=None):
+    def signature(self, changes, camera_changes=None, handeye_changes=None,
+                  matrix_digest=None):
         if self.ply is None:
             file_identity = None
         else:
             stat = self.ply.stat()
             file_identity = (str(self.ply.resolve()), stat.st_size, stat.st_mtime_ns)
         return (file_identity, tuple(sorted(changes.items())),
-                tuple(sorted((camera_changes or {}).items())))
+                tuple(sorted((camera_changes or {}).items())),
+                tuple(sorted((handeye_changes or {}).items())), matrix_digest)
 
     def preview(self):
         try:
@@ -734,6 +916,7 @@ class SetupWindow:
                 raise ValueError('请先选择历史 PLY，或在实时预览中按 S 保存并按 Q 退出')
             changes = self.changes()
             camera_changes = self.camera_changes()
+            handeye_changes, _matrix, matrix_digest = self.handeye_changes()
             overrides = dict(self.original)
             overrides.update(changes)
             exe = self.workspace / 'x86_weld_seam_test/install/bin/weld_seam_extractor'
@@ -767,7 +950,8 @@ class SetupWindow:
             if self.preview_window is not None and self.preview_window.window.winfo_exists():
                 self.preview_window.window.destroy()
             self.preview_window = PreviewWindow(self.root, result_ply, rows)
-            self.preview_signature = self.signature(changes, camera_changes)
+            self.preview_signature = self.signature(
+                changes, camera_changes, handeye_changes, matrix_digest)
             self.preview_rows = rows
             self.preview_warnings = warnings
             self.preview_result_ply = result_ply
@@ -775,6 +959,7 @@ class SetupWindow:
                 'result_ply': result_ply, 'rows': rows,
                 'source_ply': self.ply, 'changes': dict(changes),
                 'camera_changes': dict(camera_changes),
+                'handeye_changes': dict(handeye_changes),
             })
             self.history_listbox.insert(
                 'end', f'{prefix} · {len(rows)} 点 · 变更 {len(changes)} 项 · '
@@ -797,24 +982,44 @@ class SetupWindow:
                 raise ValueError('请先按 Q 关闭相机预览，释放相机连接')
             changes = self.changes()
             camera_changes = self.camera_changes()
+            handeye_changes, _matrix, matrix_digest = self.handeye_changes()
             if ((changes or self.ply is not None) and
-                    self.preview_signature != self.signature(changes, camera_changes)):
+                    self.preview_signature != self.signature(
+                        changes, camera_changes, handeye_changes, matrix_digest)):
                 raise ValueError('已选择 PLY 或修改参数；必须针对当前数值成功预览后才能确认')
+            if handeye_changes and (not self.matrix_verified.get() or
+                                     self.verified_matrix_digest != matrix_digest):
+                raise ValueError('手眼参数已改变：须核对矩阵、方向和单位并勾选标定确认')
+            if not handeye_changes and matrix_digest != self.initial_matrix_hash:
+                raise ValueError('标定矩阵文件在窗口打开后发生变化；请重新启动以复核')
             current_text = self.config_path.read_text(encoding='utf-8')
             camera_text = self.camera_path.read_text(encoding='utf-8')
+            handeye_text = self.handeye_path.read_text(encoding='utf-8')
             if hashlib.sha256(current_text.encode()).hexdigest() != self.original_hash:
                 raise ValueError('YAML 被其他程序修改；为避免覆盖请取消并重新启动')
             if hashlib.sha256(camera_text.encode()).hexdigest() != self.camera_hash:
                 raise ValueError('camera.yaml 在窗口打开后被修改；请重新启动以核对成像参数')
+            if hashlib.sha256(handeye_text.encode()).hexdigest() != self.handeye_hash:
+                raise ValueError('handeye_bridge.yaml 在窗口打开后被修改；请重新启动以复核标定')
             proposed_weld = replace_active_overrides(current_text, changes) if changes else current_text
             proposed_camera = replace_camera_parameters(camera_text, camera_changes) if camera_changes else camera_text
+            proposed_handeye = (replace_handeye_parameters(handeye_text, handeye_changes)
+                                if handeye_changes else handeye_text)
+            preview_current = self.preview_signature == self.signature(
+                changes, camera_changes, handeye_changes, matrix_digest)
+            preview_points = (len(self.preview_rows)
+                              if preview_current and self.preview_rows else None)
             warning_text = ('算法提示：' + '\n'.join(self.preview_warnings) + '\n\n'
-                            if self.preview_warnings else '')
+                            if preview_current and self.preview_warnings else '')
             if not messagebox.askyesno('最终确认',
                     f'确认启动自动链路？\n\n'
                     f'相机配置 {self.camera_path}：{len(camera_changes)} 项\n'
                     f'焊缝配置 {self.config_path}：{len(changes)} 项\n'
-                    f'{"当前预览点数 " + str(len(self.preview_rows)) if self.preview_rows else "沿用现有配置，跳过离线预览"}。\n\n'
+                    f'手眼配置 {self.handeye_path}：{len(handeye_changes)} 项\n'
+                    f'矩阵：{self.handeye_vars["matrix_file"].get()}\n'
+                    f'方向：{self.handeye_vars["matrix_direction"].get()}；'
+                    f'平移单位：{self.handeye_vars["matrix_translation_unit"].get()}\n'
+                    f'{"当前预览点数 " + str(preview_points) if preview_points else "未使用离线预览，须现场核对"}。\n\n'
                     + warning_text +
                     '确认后启动相机、焊缝、手眼、协调节点；'
                     '之后多条 ABB 请求自动处理，不再逐次询问。',
@@ -827,6 +1032,9 @@ class SetupWindow:
             if changes:
                 plans.append((self.config_path, current_text, proposed_weld,
                               self.session / 'weld_seam.before.yaml'))
+            if handeye_changes:
+                plans.append((self.handeye_path, handeye_text, proposed_handeye,
+                              self.session / 'handeye_bridge.before.yaml'))
             completed = []
             try:
                 for path, before, updated, backup in plans:
@@ -839,13 +1047,19 @@ class SetupWindow:
                     'approved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
                     'config': str(self.config_path), 'changes': changes,
                     'camera_config': str(self.camera_path), 'camera_changes': camera_changes,
-                    'preview_ply': str(self.ply) if self.ply else None,
-                    'preview_result_ply': str(self.preview_result_ply) if self.preview_result_ply else None,
-                    'preview_points': len(self.preview_rows) if self.preview_rows else None,
+                    'handeye_config': str(self.handeye_path),
+                    'handeye_changes': handeye_changes,
+                    'matrix_sha256': matrix_digest,
+                    'preview_ply': str(self.ply) if preview_current and self.ply else None,
+                    'preview_result_ply': (str(self.preview_result_ply)
+                                           if preview_current and self.preview_result_ply else None),
+                    'preview_points': preview_points,
                     'config_sha256_after': hashlib.sha256(
                         self.config_path.read_bytes()).hexdigest(),
                     'camera_sha256_after': hashlib.sha256(
                         self.camera_path.read_bytes()).hexdigest(),
+                    'handeye_sha256_after': hashlib.sha256(
+                        self.handeye_path.read_bytes()).hexdigest(),
                 }, ensure_ascii=False, indent=2), encoding='utf-8')
             except Exception:
                 for path, before in reversed(completed):
@@ -864,8 +1078,8 @@ class SetupWindow:
 
 
 def main():
-    if len(sys.argv) != 4:
-        raise SystemExit('用法: weld_operator_setup <workspace> <weld_yaml> <camera_yaml>')
+    if len(sys.argv) not in (4, 5):
+        raise SystemExit('用法: weld_operator_setup <workspace> <weld_yaml> <camera_yaml> [handeye_yaml]')
     window = SetupWindow(*(Path(arg).resolve() for arg in sys.argv[1:]))
     window.root.mainloop()
     return 0 if window.approved else 2

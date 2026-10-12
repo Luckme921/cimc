@@ -1,8 +1,11 @@
 """Offline checks for the operator form; no Tk display or hardware needed."""
 
 import sys
+import hashlib
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -11,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cimc.weld_operator_setup import (  # noqa: E402
     CAMERA_FIELDS, GROUP_DEFAULTS, ROI_KEYS, WELD_COMMON, SetupWindow,
     active_overrides, camera_save_directory, replace_active_overrides,
-    replace_camera_parameters, viewer_command,
+    replace_camera_parameters, replace_handeye_parameters,
+    inspect_handeye_matrix, viewer_command,
 )
 
 
@@ -29,6 +33,7 @@ class OperatorConfigTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[3]
         cls.weld_text = (root / 'src/weld_seam_perception/config/weld_seam.yaml').read_text()
         cls.camera_text = (root / 'src/chishine_camera_ros2/config/camera.yaml').read_text()
+        cls.handeye_text = (root / 'src/cimc/config/handeye_bridge.yaml').read_text()
 
     def make_form(self):
         form = SetupWindow.__new__(SetupWindow)
@@ -84,6 +89,71 @@ class OperatorConfigTest(unittest.TestCase):
         form.vars['path.rounded_corner_point_count'].value = '4'
         with self.assertRaises(ValueError):
             form.changes()
+
+    def test_handeye_matrix_validation_and_direction_write(self):
+        params = yaml.safe_load(self.handeye_text)[
+            'handeye_abb_bridge_node']['ros__parameters']
+        matrix, digest = inspect_handeye_matrix(params['matrix_file'], params['matrix_key'])
+        self.assertEqual(matrix.shape, (4, 4))
+        self.assertEqual(len(digest), 64)
+        changed = replace_handeye_parameters(
+            self.handeye_text, {'matrix_direction': 'camera_from_tcp'})
+        self.assertEqual(yaml.safe_load(changed)[
+            'handeye_abb_bridge_node']['ros__parameters']['matrix_direction'],
+            'camera_from_tcp')
+        self.assertIn('send_to_abb: true', changed)
+
+    def test_final_approval_writes_three_temp_configs_only(self):
+        form = self.make_form()
+        params = yaml.safe_load(self.handeye_text)[
+            'handeye_abb_bridge_node']['ros__parameters']
+        form.handeye_params = params
+        form.handeye_vars = {key: Value(str(params[key])) for key in (
+            'matrix_file', 'matrix_key', 'matrix_direction', 'matrix_translation_unit')}
+        form.handeye_vars['matrix_direction'].value = 'camera_from_tcp'
+        form.camera_vars['depth_exposure'].value = '15000'
+        form.vars['path.rounded_corner_spacing'].value = '4'
+        form.original_text = self.weld_text
+        form.original_hash = hashlib.sha256(self.weld_text.encode()).hexdigest()
+        form.camera_hash = hashlib.sha256(self.camera_text.encode()).hexdigest()
+        form.handeye_hash = hashlib.sha256(self.handeye_text.encode()).hexdigest()
+        _matrix, digest = inspect_handeye_matrix(params['matrix_file'], params['matrix_key'])
+        form.initial_matrix_hash = digest
+        form.verified_matrix_digest = digest
+        form.matrix_verified = Value(True)
+        form.viewer_running = False
+        form.ply = None
+        form.preview_rows = [{'order': '0'}]
+        form.preview_result_ply = None
+        form.preview_warnings = []
+        form.preview_signature = form.signature(
+            form.changes(), form.camera_changes(), form.handeye_changes()[0], digest)
+        form.root = Mock()
+        with tempfile.TemporaryDirectory(prefix='operator_approve_test_', dir='/tmp') as directory:
+            base = Path(directory)
+            form.workspace = base
+            form.session = base / 'session'
+            form.session.mkdir()
+            form.config_path = base / 'weld_seam.yaml'
+            form.camera_path = base / 'camera.yaml'
+            form.handeye_path = base / 'handeye_bridge.yaml'
+            form.config_path.write_text(self.weld_text)
+            form.camera_path.write_text(self.camera_text)
+            form.handeye_path.write_text(self.handeye_text)
+            with patch('cimc.weld_operator_setup.messagebox.askyesno', return_value=True), \
+                    patch('cimc.weld_operator_setup.messagebox.showerror') as error:
+                form.approved = False
+                form.approve()
+                error.assert_not_called()
+            self.assertTrue(form.approved)
+            self.assertEqual(active_overrides(form.config_path.read_text())[
+                'path.rounded_corner_spacing'], '4')
+            self.assertEqual(yaml.safe_load(form.camera_path.read_text())[
+                'chishine_camera_node']['ros__parameters']['depth_exposure'], 15000)
+            self.assertEqual(yaml.safe_load(form.handeye_path.read_text())[
+                'handeye_abb_bridge_node']['ros__parameters']['matrix_direction'],
+                'camera_from_tcp')
+            self.assertTrue((form.session / 'approval.json').is_file())
 
 
 if __name__ == '__main__':

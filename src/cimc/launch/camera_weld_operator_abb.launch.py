@@ -25,8 +25,8 @@ def _validate_abb_test_configuration(context, *files):
     coordinator = params[3]['weld_task_coordinator_node']['ros__parameters']
     if handeye.get('send_to_abb') is not True:
         raise RuntimeError('ABB 模式要求 handeye_bridge.yaml send_to_abb=true')
-    if not Path(str(handeye.get('matrix_file', ''))).is_file():
-        raise RuntimeError('手眼矩阵文件不存在')
+    # The operator may select a new calibrated matrix in the setup window.
+    # Rigid-transform validation happens there before runtime nodes start.
     if receiver.get('third_party_link_enabled') is not False:
         raise RuntimeError('ABB 模式要求 third_party_link_enabled=false')
     if (receiver.get('abb_capture_command') != coordinator.get('start_command') or
@@ -39,7 +39,7 @@ def _manual_runtime(context, event, *args):
     if event.returncode != 0:
         return [LogInfo(msg='人工标定未确认；不启动相机/焊缝/手眼自动链路。'),
                 EmitEvent(event=Shutdown(reason='operator setup cancelled or failed'))]
-    camera, weld, handeye, coordinator, echo = args
+    camera, weld, handeye, coordinator, echo, status_window, workspace = args
     actions = [LogInfo(msg=(
         '人工确认已完成。预览相机已退出；现在启动相机、焊缝、手眼与协调节点。'
         '之后可连续处理多条 ABB 拍照请求。'))]
@@ -51,6 +51,11 @@ def _manual_runtime(context, event, *args):
         actions.append(Node(package=package, executable=executable,
                             name=executable, parameters=[config],
                             output='screen', emulate_tty=True))
+    if context.perform_substitution(status_window) == 'true':
+        actions.append(ExecuteProcess(
+            cmd=['python3', PathJoinSubstitution([
+                workspace, 'src', 'cimc', 'cimc', 'weld_operator_status.py'])],
+            name='weld_operator_status', output='screen'))
     if context.perform_substitution(echo) == 'true':
         for name, topic in (
                 ('weld_task_status_echo', '/weld_task/status'),
@@ -66,7 +71,7 @@ def _manual_runtime(context, event, *args):
 
 
 def _select_mode(context, *args):
-    mode, workspace, camera, weld, handeye, coordinator, receiver, echo = args
+    mode, workspace, camera, weld, handeye, coordinator, receiver, echo, status_window = args
     if context.perform_substitution(mode) == 'fixed':
         old_launch = Path(context.perform_substitution(workspace)) / (
             'src/cimc/launch/camera_weld_handeye_abb_test.launch.py')
@@ -88,7 +93,7 @@ def _select_mode(context, *args):
     setup = ExecuteProcess(
         cmd=['python3', PathJoinSubstitution([
                  workspace, 'src', 'cimc', 'cimc', 'weld_operator_setup.py']),
-             workspace, weld, camera],
+             workspace, weld, camera, handeye],
         name='weld_operator_setup', output='screen')
     return preflight + [
         LogInfo(msg=(
@@ -101,7 +106,8 @@ def _select_mode(context, *args):
         RegisterEventHandler(OnProcessExit(
             target_action=setup,
             on_exit=lambda event, ctx: _manual_runtime(
-                ctx, event, camera, weld, handeye, coordinator, echo))),
+                ctx, event, camera, weld, handeye, coordinator,
+                echo, status_window, workspace))),
         setup,
     ]
 
@@ -115,11 +121,14 @@ def generate_launch_description():
     receiver = LaunchConfiguration('data_receiver_params_file')
     mode = LaunchConfiguration('workflow_mode')
     echo = LaunchConfiguration('echo_topics')
+    status_window = LaunchConfiguration('show_operator_status')
     return LaunchDescription([
         DeclareLaunchArgument('workspace_root', default_value='/home/mini/x86_ros2_ws'),
         DeclareLaunchArgument('workflow_mode', default_value='manual',
                               choices=['manual', 'fixed']),
         DeclareLaunchArgument('echo_topics', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('show_operator_status', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('camera_params_file', default_value=PathJoinSubstitution(
             [workspace, 'src', 'chishine_camera_ros2', 'config', 'camera.yaml'])),
@@ -133,5 +142,5 @@ def generate_launch_description():
             [workspace, 'src', 'cimc', 'config', 'data_receiver.yaml'])),
         OpaqueFunction(function=_select_mode,
                        args=[mode, workspace, camera, weld, handeye,
-                             coordinator, receiver, echo]),
+                             coordinator, receiver, echo, status_window]),
     ])

@@ -247,11 +247,16 @@ class DataReceiverNode(Node):
             String, '/abb/tx_status', 10)
         self.abb_task_timing_pub = self.create_publisher(
             String, '/abb/task_timing', 10)
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        connection_qos = QoSProfile(depth=1)
+        connection_qos.reliability = ReliabilityPolicy.RELIABLE
+        connection_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.abb_connection_status_pub = self.create_publisher(
+            String, '/abb/connection_status', connection_qos)
         self.abb_tx_sub = self.create_subscription(
             String, '/abb/tx_text', self.abb_tx_callback, 10)
         # The coordinator publishes its initial idle only once. Transient-local
         # durability prevents manual-mode readiness from being lost in discovery.
-        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
         task_status_qos = QoSProfile(depth=1)
         task_status_qos.reliability = ReliabilityPolicy.RELIABLE
         task_status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -500,6 +505,12 @@ class DataReceiverNode(Node):
         status.data = ('OK:' if success else 'ERROR:') + message
         self.abb_tx_status_pub.publish(status)
 
+    def publish_abb_connection_status(self, state, peer=''):
+        status = String()
+        status.data = json.dumps({'state': state, 'peer': peer},
+                                 ensure_ascii=False, separators=(',', ':'))
+        self.abb_connection_status_pub.publish(status)
+
     def weld_task_status_callback(self, msg):
         """Attach the coordinator task id and close failed task timers."""
         try:
@@ -683,6 +694,7 @@ class DataReceiverNode(Node):
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(1)
             self.server_socket.settimeout(1.0)
+            self.publish_abb_connection_status('listening')
 
             while rclpy.ok() and self.is_running:
                 try:
@@ -696,6 +708,8 @@ class DataReceiverNode(Node):
                         receive_buffer = bytearray()
                         with self.abb_connection_lock:
                             self.abb_connection = conn
+                        self.publish_abb_connection_status(
+                            'connected', f'{client_ip}:{addr[1]}')
 
                         while rclpy.ok() and self.is_running:
                             try:
@@ -739,11 +753,14 @@ class DataReceiverNode(Node):
                     with self.abb_connection_lock:
                         if self.abb_connection is conn:
                             self.abb_connection = None
+                    if client_ip == self.target_ip:
+                        self.publish_abb_connection_status('disconnected')
                     conn.close()
                 except socket.timeout:
                     pass
         except Exception as e:
             self.get_logger().error(f"Socket 启动失败: {e}")
+            self.publish_abb_connection_status('listen_error')
         finally:
             if self.server_socket:
                 self.server_socket.close()
