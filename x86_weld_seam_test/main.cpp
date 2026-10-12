@@ -194,7 +194,8 @@ static LocalBottomHeightProfile estimateLocalBottomHeight(
     const Eigen::Vector3f& n_side, float d_side,
     const Eigen::Vector3f& n_tangent, float y_min,
     float bin_width, float support_band, float normal_dot_min,
-    int min_bin_points, float max_abs_correction, float max_bin_mad)
+    int min_bin_points, float max_abs_correction, float max_bin_mad,
+    float activation_min_mm)
 {
     LocalBottomHeightProfile profile;
     if (!cloud || cloud->empty()) return profile;
@@ -240,14 +241,25 @@ static LocalBottomHeightProfile estimateLocalBottomHeight(
     }
     // Sparse support cannot distinguish a real bottom from a few unrelated
     // horizontal patches. Fall back to the original global plane in that case.
-    if (profile.centers.size() < 3 ||
-        profile.centers.size() * 2 < static_cast<size_t>(bin_count)) {
+    const size_t supported_bins = profile.centers.size();
+    const bool insufficient_support = supported_bins < 3 ||
+        supported_bins * 2 < static_cast<size_t>(bin_count);
+    float observed_max_abs = 0.0f;
+    for (float height : profile.heights) {
+        observed_max_abs = std::max(observed_max_abs, std::abs(height));
+    }
+    // Historical data showed that sub-millimetre corrections can change
+    // discrete seam/feature decisions without demonstrated accuracy gains.
+    // Keep the global fit unless the supported correction is significant.
+    const bool insignificant_correction =
+        !insufficient_support && observed_max_abs < activation_min_mm;
+    if (insufficient_support || insignificant_correction) {
         profile.centers.clear();
         profile.heights.clear();
     } else {
         profile.bin_width = bin_width;
     }
-    std::cout << "Experimental local bottom: " << profile.centers.size()
+    std::cout << "Experimental local bottom: " << supported_bins
         << "/" << bin_count << " supported bins";
     if (!profile.heights.empty()) {
         const auto range = std::minmax_element(
@@ -255,7 +267,13 @@ static LocalBottomHeightProfile estimateLocalBottomHeight(
         std::cout << ", correction=[" << *range.first << ", "
             << *range.second << "] mm";
     } else {
-        std::cout << "; insufficient support, using global plane";
+        if (insignificant_correction) {
+            std::cout << "; max |correction|=" << observed_max_abs
+                << " mm < activation_min_mm=" << activation_min_mm
+                << " mm, using global plane";
+        } else {
+            std::cout << "; insufficient support, using global plane";
+        }
     }
     std::cout << std::endl;
     return profile;
@@ -5043,6 +5061,7 @@ static int executeWeldSeamExtraction(
     int local_bottom_min_bin_points = 100;
     float local_bottom_max_abs_correction = 3.0f;
     float local_bottom_max_bin_mad = 1.0f;
+    float local_bottom_activation_min_mm = 1.0f;
 
     // 7. 焊缝二次拐点提取参数。L 侧板方向为物理凸出正方向，因而靠近
     // y_local=0 的较小 y 层属于凸角。凹角内部用两侧各 5mm 构造安全弦，
@@ -5143,6 +5162,7 @@ static int executeWeldSeamExtraction(
     APPLY_INT("primary.local_bottom.min_bin_points", local_bottom_min_bin_points);
     APPLY_FLOAT("primary.local_bottom.max_abs_correction", local_bottom_max_abs_correction);
     APPLY_FLOAT("primary.local_bottom.max_bin_mad", local_bottom_max_bin_mad);
+    APPLY_FLOAT("primary.local_bottom.activation_min_mm", local_bottom_activation_min_mm);
 
     APPLY_FLOAT("feature.profile_bin_width", feature_params.profile_bin_width);
     APPLY_FLOAT("feature.flat_normal_dot_min", feature_params.flat_normal_dot_min);
@@ -5349,7 +5369,10 @@ static int executeWeldSeamExtraction(
         local_bottom_min_bin_points < 3 ||
         !std::isfinite(local_bottom_max_abs_correction) ||
         local_bottom_max_abs_correction <= 0.0f ||
-        !std::isfinite(local_bottom_max_bin_mad) || local_bottom_max_bin_mad <= 0.0f) {
+        !std::isfinite(local_bottom_max_bin_mad) || local_bottom_max_bin_mad <= 0.0f ||
+        !std::isfinite(local_bottom_activation_min_mm) ||
+        local_bottom_activation_min_mm < 0.0f ||
+        local_bottom_activation_min_mm > local_bottom_max_abs_correction) {
         run_result.message = "Invalid primary.local_bottom parameters.";
         std::cerr << run_result.message << std::endl;
         return -1;
@@ -5847,7 +5870,7 @@ static int executeWeldSeamExtraction(
             y_filter_threshold, local_bottom_bin_width,
             local_bottom_support_band, local_bottom_normal_dot_min,
             local_bottom_min_bin_points, local_bottom_max_abs_correction,
-            local_bottom_max_bin_mad);
+            local_bottom_max_bin_mad, local_bottom_activation_min_mm);
     }
 
     // 5. 提取候选点，并执行【二维联合滤波】
