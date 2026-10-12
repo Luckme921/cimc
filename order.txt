@@ -113,9 +113,9 @@ cd ~/x86_ros2_ws/x86_chishine_live_viewer
   --usb false \
   --depth-min-mm 100 \
   --depth-max-mm 600 \
-  --gain 1 \
-  --frame-time 10000 \
-  --exposure 8000 \
+  --gain 2 \
+  --frame-time 20000 \
+  --exposure 14000\
   --point-size 2 \
   --max-display-points 600000 \
   --save-dir /home/mini/scut_weld_data/pointclouds
@@ -715,3 +715,7 @@ python3 x86_weld_seam_test/tests/rounded_field_regression.py
 # ~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.2
 # 2.2.1完整回退构建/安装命令见：
 # ~/x86_ros2_ws/x86_weld_seam_test/backups/2.2.1/README.md
+
+
+#ros2 topic pub --once /abb/raw_text std_msgs/msg/String "{data: 'START_CAPTURE:780.21,-32.43,752.75,0.38374,-0.78098,0.41132,-0.27135'}"
+#ros2 launch cimc camera_weld_handeye_abb_test.launch.py
