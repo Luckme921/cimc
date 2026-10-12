@@ -7,7 +7,7 @@ import yaml
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, EmitEvent, ExecuteProcess,
                             IncludeLaunchDescription, LogInfo, OpaqueFunction,
-                            RegisterEventHandler)
+                            RegisterEventHandler, SetEnvironmentVariable)
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
@@ -122,14 +122,23 @@ def generate_launch_description():
     mode = LaunchConfiguration('workflow_mode')
     echo = LaunchConfiguration('echo_topics')
     status_window = LaunchConfiguration('show_operator_status')
+    use_shared_memory = LaunchConfiguration('use_shared_memory')
     return LaunchDescription([
         DeclareLaunchArgument('workspace_root', default_value='/home/mini/x86_ros2_ws'),
         DeclareLaunchArgument('workflow_mode', default_value='manual',
                               choices=['manual', 'fixed']),
-        DeclareLaunchArgument('echo_topics', default_value='true',
+        DeclareLaunchArgument('echo_topics', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('show_operator_status', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('use_shared_memory', default_value='true',
+                              choices=['true', 'false']),
+        # Fast DDS DEFAULT = SHM for same-host peers, UDPv4 fallback/discovery.
+        # Keep both transports: SHM-only would break remote ROS diagnostics.
+        SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp',
+                               condition=IfCondition(use_shared_memory)),
+        SetEnvironmentVariable('FASTDDS_BUILTIN_TRANSPORTS', 'DEFAULT',
+                               condition=IfCondition(use_shared_memory)),
         DeclareLaunchArgument('camera_params_file', default_value=PathJoinSubstitution(
             [workspace, 'src', 'chishine_camera_ros2', 'config', 'camera.yaml'])),
         DeclareLaunchArgument('weld_params_file', default_value=PathJoinSubstitution(
