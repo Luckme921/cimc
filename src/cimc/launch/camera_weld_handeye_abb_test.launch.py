@@ -146,6 +146,8 @@ def generate_launch_description():
             executable='chishine_camera_node',
             name='chishine_camera_node',
             parameters=[camera_params_file],
+            # The SDK must query camera metadata directly on the LAN.
+            additional_env={'NO_PROXY': '*', 'no_proxy': '*'},
             output='screen', emulate_tty=True),
         Node(
             package='weld_seam_perception',

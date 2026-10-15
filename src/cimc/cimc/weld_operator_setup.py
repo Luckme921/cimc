@@ -75,6 +75,9 @@ def camera_save_directory(camera_params):
 def viewer_command(executable, save_directory, manifest, camera_params, roi_values):
     """Use the same depth settings as camera.yaml, plus the live ROI controls."""
     command = [str(executable), '--network', 'true', '--usb', 'false',
+               # Keep the operator window responsive when the camera is off;
+               # a later click can retry while the ROS node keeps its YAML policy.
+               '--attempts', '3', '--retry-ms', '500',
                '--save-dir', str(save_directory), '--snapshot-manifest', str(manifest),
                '--point-size', '2', '--max-display-points', '600000',
                '--roi', roi_values['roi.enable']]
@@ -89,6 +92,14 @@ def viewer_command(executable, save_directory, manifest, camera_params, roi_valu
         if key in camera_params:
             command += [flag, str(camera_params[key])]
     return command
+
+
+def camera_direct_environment():
+    """Keep the camera SDK's HTTP requests to LAN devices off local proxies."""
+    environment = os.environ.copy()
+    environment['NO_PROXY'] = '*'
+    environment['no_proxy'] = '*'
+    return environment
 
 
 def active_overrides(config_text):
@@ -854,7 +865,7 @@ class SetupWindow:
             self.status.set('实时预览独占相机：按 S 保存 ROI 点云，再按 Q 退出。')
             self.root.update_idletasks()
             self.viewer_running = True
-            subprocess.run(command, check=True)
+            subprocess.run(command, check=True, env=camera_direct_environment())
             if (self.manifest.is_file() and
                     (previous_manifest_time is None or
                      self.manifest.stat().st_mtime_ns > previous_manifest_time)):
@@ -869,6 +880,12 @@ class SetupWindow:
                 self.update_review()
             else:
                 self.status.set('预览已退出但没有新保存的 PLY；仍使用之前选择的点云。')
+        except subprocess.CalledProcessError as exc:
+            messagebox.showerror(
+                '相机预览失败',
+                f'实时查看器退出（代码 {exc.returncode}）。请确认相机已上电、'
+                '网络 192.168.3.99 可达且没有另一个相机进程占用；'
+                '若仍显示 devices=0，请查看终端中的 SDK 枚举信息后重试。')
         except Exception as exc:
             messagebox.showerror('相机预览失败', str(exc))
         finally:

@@ -2,6 +2,7 @@
 
 import sys
 import hashlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +16,7 @@ from cimc.weld_operator_setup import (  # noqa: E402
     CAMERA_FIELDS, GROUP_DEFAULTS, ROI_KEYS, WELD_COMMON, SetupWindow,
     active_overrides, camera_save_directory, replace_active_overrides,
     replace_camera_parameters, replace_handeye_parameters,
-    inspect_handeye_matrix, viewer_command,
+    inspect_handeye_matrix, viewer_command, camera_direct_environment,
 )
 
 
@@ -72,6 +73,15 @@ class OperatorConfigTest(unittest.TestCase):
                                  '/tmp/manifest', form.current_camera_params(),
                                  {key: form.vars[key].get() for key in ROI_KEYS})
         self.assertEqual(command[command.index('--exposure') + 1], '15000.0')
+        self.assertEqual(command[command.index('--attempts') + 1], '3')
+
+    def test_camera_viewer_bypasses_proxy_without_changing_parent(self):
+        with patch.dict(os.environ, {'HTTP_PROXY': 'http://127.0.0.1:7688',
+                                     'NO_PROXY': 'localhost'}):
+            environment = camera_direct_environment()
+            self.assertEqual(environment['NO_PROXY'], '*')
+            self.assertEqual(environment['no_proxy'], '*')
+            self.assertEqual(os.environ['NO_PROXY'], 'localhost')
 
     def test_common_weld_edit_reaches_algorithm_override(self):
         form = self.make_form()

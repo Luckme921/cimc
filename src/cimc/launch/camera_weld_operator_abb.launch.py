@@ -48,8 +48,13 @@ def _manual_runtime(context, event, *args):
             ('weld_seam_perception', 'weld_seam_node', weld),
             ('cimc', 'handeye_abb_bridge_node', handeye),
             ('cimc', 'weld_task_coordinator_node', coordinator)):
+        # The camera SDK queries LAN device metadata over HTTP. A desktop
+        # proxy can make discovery report zero devices despite UDP replies.
+        camera_env = ({'NO_PROXY': '*', 'no_proxy': '*'}
+                      if executable == 'chishine_camera_node' else {})
         actions.append(Node(package=package, executable=executable,
                             name=executable, parameters=[config],
+                            additional_env=camera_env,
                             output='screen', emulate_tty=True))
     if context.perform_substitution(status_window) == 'true':
         actions.append(ExecuteProcess(

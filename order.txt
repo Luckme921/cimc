@@ -727,6 +727,10 @@ python3 x86_weld_seam_test/tests/rounded_field_regression.py
 # 属于历史记录；当前运行版本以节点启动日志和工作区 SDK 安装库为准。
 # 当前总 launch 只负责 ABB 拍照请求 -> 相机 -> 焊缝 -> 手眼 -> ABB 轨迹，
 # 不启动焊机、电机或第三方 192.168.3.5 控制通道。
+# 不可与旧 camera_weld_handeye_abb_test.launch.py 同时运行：两者争用
+# 同一相机和 ABB TCP 45000 端口，也会重复处理相同 ROS 话题。
+# 相机 SDK 的局域网 HTTP 查询必须直连；当前新/旧 ABB launch 中的
+# 相机节点和人工实时查看器已在各自子进程绕过 HTTP 代理。
 # 重要：本节的现场 launch 会监听 ABB TCP；手眼配置 send_to_abb=true 时，
 # 收到有效 START_CAPTURE 且处理成功，就可能把轨迹发给 ABB。
 # ABB 端是否存点、规划或运动取决于其 RAPID 程序；必须先由现场人员确认
