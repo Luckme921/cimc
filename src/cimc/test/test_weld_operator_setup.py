@@ -17,6 +17,7 @@ from cimc.weld_operator_setup import (  # noqa: E402
     active_overrides, camera_save_directory, replace_active_overrides,
     replace_camera_parameters, replace_handeye_parameters,
     inspect_handeye_matrix, viewer_command, camera_direct_environment,
+    preview_failure_explanation,
 )
 
 
@@ -122,6 +123,13 @@ class OperatorConfigTest(unittest.TestCase):
             form.poll_viewer()
             self.assertFalse(form.viewer_running)
             self.assertIsNone(form.viewer_process)
+
+    def test_unsafe_rounded_boundary_failure_has_chinese_guidance(self):
+        message = preview_failure_explanation(
+            'rounded features: cannot select measured end boundary on supported seam')
+        self.assertIn('末端', message)
+        self.assertIn('拒绝输出', message)
+        self.assertIn('不要单纯放大吸附距离', message)
 
     def test_camera_viewer_bypasses_proxy_without_changing_parent(self):
         with patch.dict(os.environ, {'HTTP_PROXY': 'http://127.0.0.1:7688',

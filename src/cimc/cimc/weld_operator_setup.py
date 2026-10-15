@@ -62,6 +62,19 @@ HANDEYE_FIELDS = ('matrix_file', 'matrix_key', 'matrix_direction',
                   'matrix_translation_unit')
 
 
+def preview_failure_explanation(output):
+    """Give actionable context without converting an unsafe failed path to success."""
+    if 'cannot select measured end boundary on supported seam' in output:
+        return ('圆角路径末端的拟合直线没有找到足够接近的真实红色焊缝点，'
+                '本次轨迹已拒绝输出。请检查原始 PLY 的末端是否有转角、'
+                '反光空洞或 ROI 裁掉了转角后的支撑线；必要时重新取景/拍照。'
+                '不要单纯放大吸附距离，也不要把单角点模式的短路径直接用于焊接。')
+    if 'cannot select measured start boundary on supported seam' in output:
+        return ('圆角路径起始端缺少靠近拟合直线的可靠实测红点，'
+                '本次轨迹已拒绝输出。请核对起点两侧的点云与 ROI，必要时重新拍照。')
+    return ''
+
+
 def camera_save_directory(camera_params):
     """Match the camera ROS node's configured/default PLY directory."""
     configured = str(camera_params.get('output_directory', '')).strip()
@@ -987,7 +1000,10 @@ class SetupWindow:
             log_path.write_text(
                 result.stdout + '\n' + result.stderr, encoding='utf-8')
             if result.returncode:
+                guidance = preview_failure_explanation(
+                    result.stdout + '\n' + result.stderr)
                 raise RuntimeError(f'算法失败，见 {log_path}\n'
+                                   + (guidance + '\n\n' if guidance else '')
                                    + (result.stderr or result.stdout)[-1000:])
             csv_path = self.session / f'{prefix}_features.csv'
             with csv_path.open(newline='', encoding='utf-8') as stream:
