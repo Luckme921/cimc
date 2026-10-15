@@ -719,3 +719,107 @@ python3 x86_weld_seam_test/tests/rounded_field_regression.py
 
 #ros2 topic pub --once /abb/raw_text std_msgs/msg/String "{data: 'START_CAPTURE:780.21,-32.43,752.75,0.38374,-0.78098,0.41132,-0.27135'}"
 #ros2 launch cimc camera_weld_handeye_abb_test.launch.py
+
+# ============================================================
+# 15. 当前总 launch：人工复核 / 固定夹具（新入口，优先看本节）
+# ============================================================
+# 本文件是命令备忘，不要整份交给 bash 执行。第 14 节的旧 SDK 版本说明
+# 属于历史记录；当前运行版本以节点启动日志和工作区 SDK 安装库为准。
+# 当前总 launch 只负责 ABB 拍照请求 -> 相机 -> 焊缝 -> 手眼 -> ABB 轨迹，
+# 不启动焊机、电机或第三方 192.168.3.5 控制通道。
+# 重要：本节的现场 launch 会监听 ABB TCP；手眼配置 send_to_abb=true 时，
+# 收到有效 START_CAPTURE 且处理成功，就可能把轨迹发给 ABB。
+# ABB 端是否存点、规划或运动取决于其 RAPID 程序；必须先由现场人员确认
+# 禁弧、安全区域、低速和机器人端的“仅存点/打印”或其他预期模式。
+
+# ------------------------------------------------------------
+# 15.1 新终端准备与只读检查：不连接相机、不启动 ABB 监听
+# ------------------------------------------------------------
+cd /home/mini/x86_ros2_ws
+source /opt/ros/humble/setup.bash
+source /home/mini/x86_ros2_ws/install/setup.bash
+
+# 只显示新 launch 可用参数及默认值，不启动任何节点或设备。
+ros2 launch cimc camera_weld_operator_abb.launch.py --show-args
+
+# 查看现场实际参数；请只读检查，不要在 launch 命令里再写一套算法参数。
+# 相机：深度范围、增益、曝光和帧时间。
+# 焊缝：ROI、path.mode、四类角/圆角/直线中点的偏移和姿态。
+# 手眼：矩阵文件与方向、send_to_abb；ABB：监听地址与来源 IP。
+rg -n 'exposure|gain|frame_time|depth_min|depth_max' src/chishine_camera_ros2/config/camera.yaml
+rg -n 'roi\.|path\.mode|rounded_pose_strategy|position_offset' src/weld_seam_perception/config/weld_seam.yaml
+rg -n 'matrix_file|matrix_direction|send_to_abb' src/cimc/config/handeye_bridge.yaml
+rg -n 'listen_host|listen_port|abb_allowed_ip|third_party_link_enabled' src/cimc/config/data_receiver.yaml
+
+# ------------------------------------------------------------
+# 15.2 无硬件测试：先复用第 14.2 节，只启动焊缝节点处理历史 PLY
+# ------------------------------------------------------------
+# 不要为了测试历史 PLY 而启动本节的 ABB 总 launch；第 14.2 节使用独立
+# ROS_DOMAIN_ID，只发送 PLY 路径给焊缝节点，能检查当前 weld_seam.yaml、
+# 结果 CSV/result.ply、点数、首末角、圆角姿态和算法耗时，不连接相机/ABB。
+# 注意：这只能证明软件算法输出，不验证拍照、手眼物理方向或机器人可达。
+
+# 如果要测试新 launch 的人工配置界面：确保 ABB 未连接、相机未连接或不选
+# 实时预览，然后运行 15.3 的人工模式，在窗口选择历史 PLY，调 ROI/偏移，
+# 点“用当前参数离线预览”检查结果 PLY 和点位表。只测界面时不要点击
+# “确认配置，启动自动链路”；关闭/取消窗口会结束 launch。
+# 人工模式一启动就会开放 ABB TCP 监听，因此不能把它当作完全隔离测试。
+
+# ------------------------------------------------------------
+# 15.3 现场人工复核模式：新 launch 默认方式（推荐非固定工件）
+# ------------------------------------------------------------
+# 前提：已检查 src 下各 YAML；ABB 程序进入预期的安全调试模式；
+# 实时相机查看器已退出，避免独占相机；设备和安全区域由现场人员确认。
+ros2 launch cimc camera_weld_operator_abb.launch.py
+# 等价的显式写法：
+# ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=manual
+# 含义：先启动 ABB TCP 接收节点维持连接，确认前拒绝 START_CAPTURE；
+# 操作员可选历史 PLY 或实时相机预览，调 ROI/点位偏移/相机及手眼引用。
+# “用当前参数离线预览”只看软件结果；最终点“确认配置”才写入改变的
+# src 配置 YAML 并启动相机、焊缝、协调器、手眼节点，之后可处理多次请求。
+# 若 ABB 提前发指令，会返回 TRAJECTORY_ERROR:OPERATOR_NOT_READY，不排队。
+
+# ------------------------------------------------------------
+# 15.4 现场固定夹具模式：直接使用已经验收的 YAML
+# ------------------------------------------------------------
+# 仅在工件位置、相机拍照位、ROI、偏移和手眼配置都已复核时使用。
+# 此模式不打开人工确认窗口，启动后直接进入现有 ABB 自动链路。
+ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=fixed
+
+# ------------------------------------------------------------
+# 15.5 可选启动参数：按需加在 15.3 或 15.4 命令末尾
+# ------------------------------------------------------------
+# echo_topics:=true       在终端额外打印任务/焊缝/手眼/ABB 状态话题；
+#                         默认 false，避免启动多个调试 echo 进程。
+# show_operator_status:=false  关闭人工模式确认后的只读状态窗；
+#                              固定模式本来就不打开此窗。
+# use_shared_memory:=false     不强制 Fast DDS DEFAULT SHM+UDP，继承现场
+#                              原有 DDS 环境；默认 true，不是 SHM-only。
+# 例：人工模式 + 详细终端状态 + 不开状态窗：
+# ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=manual echo_topics:=true show_operator_status:=false
+# 例：现场 DDS 发现/SHM 权限异常时的对照启动：
+# ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=manual use_shared_memory:=false
+
+# ------------------------------------------------------------
+# 15.6 启动后的只读检查：另开一个终端执行，不发布控制命令
+# ------------------------------------------------------------
+# 新终端同样需要 source /opt/ros/humble/setup.bash 和 install/setup.bash。
+# 确认节点与话题；人工模式必须等最终确认后才有相机等四个计算节点。
+ros2 node list
+ros2 topic list -t
+
+# 下面各命令单独执行；ros2 topic echo 会持续等待，按 Ctrl+C 退出。
+ros2 topic echo /abb/connection_status          # ABB TCP 是否连接
+ros2 topic echo /abb/raw_text                   # ABB 发来的 START_CAPTURE / ACK
+ros2 topic echo /weld_task/status               # capturing/extracting/completed/fault
+ros2 topic echo /weld_seam/status               # 算法成败、结果路径与耗时
+ros2 topic echo /handeye_bridge/status          # 坐标转换成败和轨迹点数
+ros2 topic echo /abb/tx_text                   # 待发送轨迹文本，不代表送达
+ros2 topic echo /abb/tx_status                 # 本机 socket 发送结果
+ros2 topic echo /abb/task_timing               # 收到命令到 sendall 返回的耗时
+
+# 判读顺序：先看 ABB 已连接和节点 ready，再由 ABB 在安全模式下发送拍照
+# 命令；检查 weld_task completed、handeye success、tx_status OK，最后
+# 看 /abb/raw_text 是否收到 TRAJECTORY_ACK。ACK 仅代表 ABB 应用层确认，
+# 不证明机器人已规划成功、可达或已经运动。/abb/task_timing 不含 ABB 执行时间。
+# 测试结束在 launch 所在终端按 Ctrl+C；再用 ros2 node list 检查遗留节点。
