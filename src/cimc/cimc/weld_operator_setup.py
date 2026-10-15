@@ -79,7 +79,8 @@ def viewer_command(executable, save_directory, manifest, camera_params, roi_valu
                # a later click can retry while the ROS node keeps its YAML policy.
                '--attempts', '3', '--retry-ms', '500',
                '--save-dir', str(save_directory), '--snapshot-manifest', str(manifest),
-               '--point-size', '2', '--max-display-points', '600000',
+               # Display decimation never changes the complete S-key PLY.
+               '--point-size', '2', '--max-display-points', '150000',
                '--roi', roi_values['roi.enable']]
     for key in ROI_KEYS[1:]:
         value = roi_values[key]
@@ -404,6 +405,9 @@ class SetupWindow:
         self.manifest = self.session / 'viewer_snapshot.yaml'
         self.ply = None
         self.viewer_running = False
+        self.viewer_process = None
+        self.viewer_manifest_time = None
+        self.viewer_saved_this_run = False
         self.preview_signature = None
         self.preview_rows = None
         self.preview_warnings = []
@@ -850,6 +854,9 @@ class SetupWindow:
                 if params[key] != self.camera_params[key]}
 
     def open_viewer(self):
+        if self.viewer_running:
+            messagebox.showinfo('相机预览', '实时点云窗口已经打开，请在该窗口调 ROI 并按 S 保存。')
+            return
         exe = self.workspace / 'x86_chishine_live_viewer/build/chishine_live_viewer'
         if not exe.is_file():
             messagebox.showerror('预览程序缺失', f'请先构建：{exe}')
@@ -860,36 +867,60 @@ class SetupWindow:
             command = viewer_command(
                 exe, camera_save_directory(camera_params), self.manifest,
                 camera_params, roi_values)
-            previous_manifest_time = (
+            self.viewer_manifest_time = (
                 self.manifest.stat().st_mtime_ns if self.manifest.is_file() else None)
-            self.status.set('实时预览独占相机：按 S 保存 ROI 点云，再按 Q 退出。')
-            self.root.update_idletasks()
+            self.viewer_saved_this_run = False
+            self.status.set('请在点云窗口按 T/B、X/Y/Z、N/M、[ ] 调 ROI；按 S 后这里会自动回填，按 Q 退出。')
+            self.viewer_process = subprocess.Popen(
+                command, env=camera_direct_environment())
             self.viewer_running = True
-            subprocess.run(command, check=True, env=camera_direct_environment())
-            if (self.manifest.is_file() and
-                    (previous_manifest_time is None or
-                     self.manifest.stat().st_mtime_ns > previous_manifest_time)):
-                data = yaml.safe_load(self.manifest.read_text(encoding='utf-8'))
-                self.ply = Path(data['ply'])
-                self.ply_label.configure(text=f'已保存：{self.ply}')
-                for key in ROI_KEYS:
-                    if key in data:
-                        self.vars[key].set(str(data[key]).lower())
-                self.preview_signature = None
-                self.status.set('ROI 已带入表单；请预览、核对后确认。')
-                self.update_review()
-            else:
-                self.status.set('预览已退出但没有新保存的 PLY；仍使用之前选择的点云。')
-        except subprocess.CalledProcessError as exc:
-            messagebox.showerror(
-                '相机预览失败',
-                f'实时查看器退出（代码 {exc.returncode}）。请确认相机已上电、'
-                '网络 192.168.3.99 可达且没有另一个相机进程占用；'
-                '若仍显示 devices=0，请查看终端中的 SDK 枚举信息后重试。')
+            self.root.after(200, self.poll_viewer)
         except Exception as exc:
             messagebox.showerror('相机预览失败', str(exc))
-        finally:
-            self.viewer_running = False
+
+    def import_viewer_snapshot(self):
+        if not self.manifest.is_file():
+            return
+        modified = self.manifest.stat().st_mtime_ns
+        if self.viewer_manifest_time is not None and modified <= self.viewer_manifest_time:
+            return
+        data = yaml.safe_load(self.manifest.read_text(encoding='utf-8'))
+        ply = Path(data['ply'])
+        if not ply.is_file():
+            raise ValueError(f'实时预览清单指向的 PLY 不存在：{ply}')
+        self.viewer_manifest_time = modified
+        self.viewer_saved_this_run = True
+        self.ply = ply
+        self.ply_label.configure(text=f'已保存：{ply}')
+        for key in ROI_KEYS:
+            if key in data:
+                self.vars[key].set(str(data[key]).lower())
+        self.preview_signature = None
+        self.status.set('按 S 保存的 ROI 已回填到表单；按 Q 退出点云窗口后可离线生成结果。')
+        self.update_review()
+
+    def poll_viewer(self):
+        try:
+            self.import_viewer_snapshot()
+        except Exception as exc:
+            self.status.set(f'读取相机保存结果失败：{exc}')
+        process = self.viewer_process
+        if process is None:
+            return
+        returncode = process.poll()
+        if returncode is None:
+            self.root.after(200, self.poll_viewer)
+            return
+        self.viewer_process = None
+        self.viewer_running = False
+        if returncode != 0:
+            messagebox.showerror(
+                '相机预览失败',
+                f'实时查看器退出（代码 {returncode}）。请确认相机已上电、'
+                '网络 192.168.3.99 可达且没有另一个相机进程占用；'
+                '若仍显示 devices=0，请查看终端中的 SDK 枚举信息后重试。')
+        elif not self.viewer_saved_this_run:
+            self.status.set('预览已退出但没有新保存的 PLY；仍使用之前选择的点云。')
 
     def pick_ply(self):
         name = filedialog.askopenfilename(filetypes=[('PLY 点云', '*.ply')])
@@ -1090,6 +1121,9 @@ class SetupWindow:
             messagebox.showerror('不能启动自动链路', str(exc))
 
     def cancel(self):
+        if self.viewer_running:
+            messagebox.showinfo('先退出点云预览', '请先在实时点云窗口按 Q，释放相机后再取消。')
+            return
         if messagebox.askyesno('取消', '取消人工确认并停止本次 launch？'):
             self.root.destroy()
 

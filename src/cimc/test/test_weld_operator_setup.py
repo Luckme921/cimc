@@ -27,6 +27,9 @@ class Value:
     def get(self):
         return self.value
 
+    def set(self, value):
+        self.value = value
+
 
 class OperatorConfigTest(unittest.TestCase):
     @classmethod
@@ -74,6 +77,51 @@ class OperatorConfigTest(unittest.TestCase):
                                  {key: form.vars[key].get() for key in ROI_KEYS})
         self.assertEqual(command[command.index('--exposure') + 1], '15000.0')
         self.assertEqual(command[command.index('--attempts') + 1], '3')
+        self.assertEqual(command[command.index('--max-display-points') + 1], '150000')
+
+    def test_viewer_s_key_imports_roi_before_viewer_exits(self):
+        form = self.make_form()
+        form.ply_label = Mock()
+        form.status = Mock()
+        form.update_review = Mock()
+        form.preview_signature = 'stale'
+        form.viewer_manifest_time = None
+        form.viewer_saved_this_run = False
+        with tempfile.TemporaryDirectory(prefix='operator_viewer_test_', dir='/tmp') as directory:
+            form.manifest = Path(directory) / 'snapshot.yaml'
+            saved = Path(directory) / 'saved.ply'
+            saved.touch()
+            form.manifest.write_text(yaml.safe_dump({
+                'ply': str(saved), 'roi.enable': True,
+                'roi.min_x': -20.5, 'roi.max_x': 120.0,
+            }), encoding='utf-8')
+            form.import_viewer_snapshot()
+            self.assertEqual(form.ply, saved)
+            self.assertEqual(form.vars['roi.enable'].get(), 'true')
+            self.assertEqual(form.vars['roi.min_x'].get(), '-20.5')
+            self.assertTrue(form.viewer_saved_this_run)
+            self.assertIsNone(form.preview_signature)
+            form.update_review.assert_called_once()
+            form.import_viewer_snapshot()
+            form.update_review.assert_called_once()
+
+    def test_viewer_poll_keeps_gui_responsive_until_q(self):
+        form = self.make_form()
+        form.root = Mock()
+        form.status = Mock()
+        form.viewer_process = Mock()
+        form.viewer_process.poll.side_effect = [None, 0]
+        form.viewer_manifest_time = None
+        form.viewer_saved_this_run = True
+        form.viewer_running = True
+        with tempfile.TemporaryDirectory(prefix='operator_viewer_test_', dir='/tmp') as directory:
+            form.manifest = Path(directory) / 'missing.yaml'
+            form.poll_viewer()
+            form.root.after.assert_called_once()
+            self.assertTrue(form.viewer_running)
+            form.poll_viewer()
+            self.assertFalse(form.viewer_running)
+            self.assertIsNone(form.viewer_process)
 
     def test_camera_viewer_bypasses_proxy_without_changing_parent(self):
         with patch.dict(os.environ, {'HTTP_PROXY': 'http://127.0.0.1:7688',

@@ -360,6 +360,41 @@ bool validPoint(const cs::float3& point)
         std::isfinite(point.z) && point.z > 0.0f;
 }
 
+std::vector<cs::float3> projectDepthForDisplay(
+    const unsigned short* depth_data, int width, int height,
+    float depth_scale, const Intrinsics& intrinsics,
+    std::size_t valid_count)
+{
+    // Match SDK generatePoints() projection, but avoid its full-resolution
+    // normal calculation on every displayed frame. The SDK path remains in
+    // use when S saves the complete PLY with normals.
+    if (intrinsics.width <= 0 || intrinsics.height <= 0 ||
+        intrinsics.fx <= 0.0f || intrinsics.fy <= 0.0f) {
+        throw std::runtime_error("Invalid depth intrinsics for live display");
+    }
+    const float scale_x = static_cast<float>(width) / intrinsics.width;
+    const float scale_y = static_cast<float>(height) / intrinsics.height;
+    const float fx = intrinsics.fx * scale_x;
+    const float fy = intrinsics.fy * scale_y;
+    const float cx = intrinsics.cx * scale_x;
+    const float cy = intrinsics.cy * scale_y;
+
+    std::vector<cs::float3> vertices;
+    vertices.reserve(valid_count);
+    for (int v = 0; v < height; ++v) {
+        for (int u = 0; u < width; ++u) {
+            const unsigned short raw = depth_data[
+                static_cast<std::size_t>(v) * width + u];
+            if (raw == 0) continue;
+            const float z = raw * depth_scale;
+            if (!std::isfinite(z) || z <= 0.0f) continue;
+            vertices.push_back(cs::float3{
+                (u - cx) * z / fx, (v - cy) * z / fy, z});
+        }
+    }
+    return vertices;
+}
+
 bool pointInsideRoi(const cs::float3& point, const RoiBounds& bounds)
 {
     if (!validPoint(point)) return false;
@@ -919,13 +954,9 @@ void runViewer(const Options& options)
             raw_max = std::max(raw_max, depth_data[i]);
         }
 
-        cs::Pointcloud pointcloud;
-        pointcloud.generatePoints(
-            const_cast<unsigned short*>(depth_data),
-            frame->getWidth(), frame->getHeight(), depth_scale,
-            &intrinsics, nullptr, nullptr, true);
-
-        const std::vector<cs::float3>& vertices = pointcloud.getVertices();
+        const std::vector<cs::float3> vertices = projectDepthForDisplay(
+            depth_data, frame->getWidth(), frame->getHeight(),
+            depth_scale, intrinsics, raw_valid_count);
         processRoiRequests(roi_controls, vertices);
         std::size_t roi_point_count = 0;
         auto display_cloud = makeDisplayCloud(
@@ -991,6 +1022,11 @@ void runViewer(const Options& options)
         processRoiRequests(roi_controls, vertices);
 
         if (g_save_requested.exchange(false)) {
+            cs::Pointcloud pointcloud;
+            pointcloud.generatePoints(
+                const_cast<unsigned short*>(depth_data),
+                frame->getWidth(), frame->getHeight(), depth_scale,
+                &intrinsics, nullptr, nullptr, true);
             const std::size_t original_points =
                 static_cast<std::size_t>(pointcloud.size());
             const std::size_t saved_points = roi_controls.bounds.enabled
