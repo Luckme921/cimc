@@ -288,9 +288,10 @@ weld_seam_node:
       # rounded_features 的每组5点在角点两侧稳健直线姿态间分摊转角；它不会读取
       # adaptive_contour 的 max_orientation_step_deg。若单步姿态仍大，可先比较
       # point_count=7，再检查相邻类别 work/lead 是否人为设置差别过大。
-      # 安全点姿态默认等于紧邻的首/末焊点，不是独立估计的“竖直下枪姿态”；
-      # 某组安全点看起来倾斜，先检查邻接焊点的四类姿态和实际TCP轴，
-      # 不要只改安全点角度造成下枪时突然旋转。
+      # 安全点原本等于紧邻的首/末焊点姿态。仅当真正首/末焊点处在实测
+      # 直腰段时，下方 waist_flat_blend 让非焊接安全点向同层平边姿态
+      # 部分靠近；首/末焊点本身、角点、直线中点及所有 XYZ 均不变。
+      # 这会在安全点与第一/最后焊点间新增旋转，必须低速验证枪体间隙。
       # SDK 2.4.8 对相邻两角间的同一物理直线只做一次鲁棒拟合，直线中点和
       # 两侧内部圆角共用该斜率，避免点焊/空洞造成两次独立拟合姿态不一致。
       - "orientation.protruding_left.work_angle_deg=35.0"
@@ -317,6 +318,11 @@ weld_seam_node:
       # - "orientation.start_transition.lead_angle_offset_deg=0.0"
       # - "orientation.end_transition.work_angle_offset_deg=0.0"
       # - "orientation.end_transition.lead_angle_offset_deg=0.0"
+      # 0=完全继承斜边焊点；1=要求平边姿态。现场先用 0.5，且新增
+      # 相邻转角最多15°；若请求比例过大，SDK自动降低实际比例。
+      # 仅直腰边界生效，平边和真实角点边界仍完全继承相邻焊点。
+      - "orientation.transition_waist_flat_blend=0.5"
+      - "orientation.transition_waist_max_turn_deg=15.0"
       # tool_x_reference=workpiece_x：工具X固定沿焊接前进轴，减少绕枪轴滚转（推荐）。
       # corner_bisector：复现旧角平分线Tool X，可能导致不同角点间较大滚转。
       # tool_positive_z... 必须匹配ABB中实际TCP的+Z；当前false表示枪体->焊丝/TCP。

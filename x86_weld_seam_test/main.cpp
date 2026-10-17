@@ -464,6 +464,11 @@ struct TorchOrientationParams {
     float start_transition_lead_angle_offset_deg = 0.0f;
     float end_transition_work_angle_offset_deg = 0.0f;
     float end_transition_lead_angle_offset_deg = 0.0f;
+    // A straight waist at a path boundary can make the non-welding safe pose
+    // look unnecessarily tilted. Blend it toward the same-layer flat pose,
+    // with a hard angular cap so the first/last MoveL remains gradual.
+    float transition_waist_flat_blend = 0.0f;
+    float transition_waist_max_turn_deg = 15.0f;
 
     // CSV 同时输出 PLY 世界姿态 qw... 和工件姿态 workpiece_qw...，顺序均为 w,x,y,z。
     // true：工具 +Z 轴定义为 TCP -> 枪体；false：工具 +Z 轴定义为枪体 -> TCP。
@@ -508,6 +513,7 @@ struct WeldPoseData {
     bool default_without_corner;
     bool interpolated_from_reference_corners;
     bool copied_from_reference_corner;
+    bool transition_waist_flat_blended;
 };
 
 struct WorkpieceOffset3f {
@@ -3612,6 +3618,14 @@ static bool validateTorchOrientationParams(const TorchOrientationParams& params)
         params.tool_x_reference != "corner_bisector") {
         return false;
     }
+    if (!std::isfinite(params.transition_waist_flat_blend) ||
+        params.transition_waist_flat_blend < 0.0f ||
+        params.transition_waist_flat_blend > 1.0f ||
+        !std::isfinite(params.transition_waist_max_turn_deg) ||
+        params.transition_waist_max_turn_deg <= 0.0f ||
+        params.transition_waist_max_turn_deg > 45.0f) {
+        return false;
+    }
     return std::isfinite(params.visualization_body_axis_length_mm) &&
         params.visualization_body_axis_length_mm >= 0.0f;
 }
@@ -3821,6 +3835,7 @@ static WeldPoseData makeTorchPoseForCorner(
     pose.default_without_corner = false;
     pose.interpolated_from_reference_corners = false;
     pose.copied_from_reference_corner = false;
+    pose.transition_waist_flat_blended = false;
     return pose;
 }
 
@@ -3914,6 +3929,7 @@ static WeldPoseData interpolateProvenCornerPoses(
     pose.default_without_corner = false;
     pose.interpolated_from_reference_corners = true;
     pose.copied_from_reference_corner = false;
+    pose.transition_waist_flat_blended = false;
     return pose;
 }
 
@@ -4049,8 +4065,9 @@ static std::vector<WeldPoseData> buildOrderedWeldPoses(
         if (!corner_indices.empty()) {
             size_t nearest_corner = corner_indices.front();
             if (features[i].is_transition_point) {
-                // 安全点由首/末焊接点生成，必须继承该相邻点姿态。按三维距离
-                // 搜索可能在波纹折返处误选另一条近邻边，造成无意义姿态跳变。
+                // 安全点由首/末焊接点生成，先继承该相邻点姿态；若启用直腰
+                // 边界缓和，再仅对安全点做受限姿态插值。按三维距离搜索可能
+                // 在波纹折返处误选另一条近邻边，造成无意义姿态跳变。
                 nearest_corner = features[i].is_start_transition
                     ? corner_indices.front() : corner_indices.back();
             } else {
@@ -4081,7 +4098,53 @@ static std::vector<WeldPoseData> buildOrderedWeldPoses(
                         work_offset, lead_offset);
                 }
             }
-            poses[i].inherited_from_nearest_corner = true;
+            const WeldFeaturePoint& adjacent = features[nearest_corner];
+            const bool straight_waist_boundary =
+                features[i].is_transition_point &&
+                (adjacent.is_boundary_seam_endpoint || adjacent.is_straight_midpoint) &&
+                adjacent.left_segment == adjacent.right_segment &&
+                (adjacent.left_segment == SEGMENT_DIAGONAL_POSITIVE ||
+                 adjacent.left_segment == SEGMENT_DIAGONAL_NEGATIVE);
+            if (straight_waist_boundary && params.transition_waist_flat_blend > 0.0f) {
+                WeldFeaturePoint flat_reference = adjacent;
+                flat_reference.left_line_slope = 0.0f;
+                flat_reference.right_line_slope = 0.0f;
+                flat_reference.left_segment = SEGMENT_FLAT;
+                flat_reference.right_segment = SEGMENT_FLAT;
+                flat_reference.pose_group_override = flat_reference.protruding
+                    ? TORCH_STRAIGHT_PROTRUDING_FLAT : TORCH_STRAIGHT_RECESSED_FLAT;
+                const float work_offset = features[i].is_start_transition
+                    ? params.start_transition_work_angle_offset_deg
+                    : params.end_transition_work_angle_offset_deg;
+                const float lead_offset = features[i].is_start_transition
+                    ? params.start_transition_lead_angle_offset_deg
+                    : params.end_transition_lead_angle_offset_deg;
+                const WeldPoseData flat_pose = makeTorchPoseWithAngleOffsets(
+                    flat_reference, n_bottom, n_side, n_tangent, params,
+                    work_offset, lead_offset);
+                const Eigen::Quaternionf waist_quaternion(
+                    poses[i].qw, poses[i].qx, poses[i].qy, poses[i].qz);
+                const Eigen::Quaternionf flat_quaternion(
+                    flat_pose.qw, flat_pose.qx, flat_pose.qy, flat_pose.qz);
+                const float full_turn_deg = waist_quaternion.angularDistance(flat_quaternion) *
+                    static_cast<float>(180.0 / 3.14159265358979323846);
+                const float applied_blend = full_turn_deg > 1e-4f
+                    ? std::min(params.transition_waist_flat_blend,
+                        params.transition_waist_max_turn_deg / full_turn_deg)
+                    : params.transition_waist_flat_blend;
+                poses[i] = interpolateProvenCornerPoses(
+                    poses[i], flat_pose, applied_blend, poses[i].group,
+                    params.tool_positive_z_points_from_tcp_to_body);
+                poses[i].transition_waist_flat_blended = true;
+                std::cout << (features[i].is_start_transition ? "Start" : "End")
+                    << " safety pose on straight waist: flat blend requested="
+                    << params.transition_waist_flat_blend << ", applied=" << applied_blend
+                    << ", adjacent turn=" << full_turn_deg * applied_blend
+                    << " deg (limit=" << params.transition_waist_max_turn_deg
+                    << " deg); weld target pose unchanged." << std::endl;
+            } else {
+                poses[i].inherited_from_nearest_corner = true;
+            }
         } else {
             // 防御性回退：若上游异常地只给出过渡点，则使用开放侧默认45°姿态。
             WeldFeaturePoint fallback = features[i];
@@ -4415,6 +4478,7 @@ static const char* poseSourceName(
     const WeldPoseData& pose,
     const WeldFeaturePoint& feature)
 {
+    if (pose.transition_waist_flat_blended) return "safety_waist_to_flat_blend";
     if (pose.inherited_from_nearest_corner) return "inherited_nearest_corner";
     if (pose.copied_from_reference_corner) return "copied_old_corner_pose";
     if (pose.interpolated_from_reference_corners)
@@ -5248,6 +5312,8 @@ static int executeWeldSeamExtraction(
     APPLY_FLOAT("orientation.start_transition.lead_angle_offset_deg", torch_params.start_transition_lead_angle_offset_deg);
     APPLY_FLOAT("orientation.end_transition.work_angle_offset_deg", torch_params.end_transition_work_angle_offset_deg);
     APPLY_FLOAT("orientation.end_transition.lead_angle_offset_deg", torch_params.end_transition_lead_angle_offset_deg);
+    APPLY_FLOAT("orientation.transition_waist_flat_blend", torch_params.transition_waist_flat_blend);
+    APPLY_FLOAT("orientation.transition_waist_max_turn_deg", torch_params.transition_waist_max_turn_deg);
     APPLY_BOOL("orientation.tool_positive_z_points_from_tcp_to_body", torch_params.tool_positive_z_points_from_tcp_to_body);
     APPLY_STRING("orientation.tool_x_reference", torch_params.tool_x_reference);
     APPLY_BOOL("orientation.tool_x_points_along_positive_workpiece_x", torch_params.tool_x_points_along_positive_workpiece_x);
@@ -6390,7 +6456,7 @@ weld_seam_sdk::RunResult weld_seam_sdk::run(const RunOptions& options)
 
 const char* weld_seam_sdk::version()
 {
-    return "2.4.11";
+    return "2.4.13";
 }
 
 std::string weld_seam_sdk::commandLineHelp()
