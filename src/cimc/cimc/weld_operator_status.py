@@ -12,6 +12,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from cimc.weld_operator_status_model import StatusModel, TOPIC_LABELS
+from cimc.weld_operator_setup import maximize_window
 
 
 class StatusSubscriber(Node):
@@ -46,6 +47,7 @@ class StatusWindow:
         root.title('华南理工大学智能焊接实验室 · 运行状态')
         root.geometry('1200x800')
         root.minsize(900, 600)
+        maximize_window(root)
         root.configure(background='#f5f8fb')
         style = ttk.Style(root)
         if 'clam' in style.theme_names():

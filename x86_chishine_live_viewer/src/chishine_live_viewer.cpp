@@ -61,6 +61,7 @@ struct Options {
     bool network = true;
     bool usb = false;
     bool binary_ply = true;
+    bool fullscreen = false;
     std::string serial;
     std::filesystem::path save_dir = "./snapshots";
     std::filesystem::path snapshot_manifest;
@@ -103,6 +104,7 @@ std::string help()
         "  --frame-timeout-ms N          Continuous frame timeout (default: 5000)\n"
         "  --width N --height N --fps F  Select Z16 stream; 0 means any\n"
         "  --point-size N                Viewer point size (default: 2)\n"
+        "  --fullscreen true|false       Fill the screen (default: false)\n"
         "  --max-display-points N        Display decimation limit (default: 300000)\n"
         "  --save-dir DIR                S-key snapshot directory (default: ./snapshots)\n"
         "  --snapshot-manifest FILE      Write last saved PLY/ROI for operator setup\n"
@@ -169,6 +171,8 @@ Options parseOptions(int argc, char** argv)
             options.fps = std::stod(requireValue(i, argc, argv));
         } else if (arg == "--point-size") {
             options.point_size = std::stoi(requireValue(i, argc, argv));
+        } else if (arg == "--fullscreen") {
+            options.fullscreen = parseBool(requireValue(i, argc, argv));
         } else if (arg == "--max-display-points") {
             options.max_display_points = static_cast<std::size_t>(
                 std::stoull(requireValue(i, argc, argv)));
@@ -894,6 +898,9 @@ void runViewer(const Options& options)
 
     auto viewer = pcl::make_shared<pcl::visualization::PCLVisualizer>(
         "Chishine3D Live Point Cloud");
+    if (options.fullscreen) {
+        viewer->setFullScreen(true);
+    }
     viewer->setBackgroundColor(0.04, 0.04, 0.06);
     viewer->addCoordinateSystem(100.0);
     viewer->addText("Waiting for depth frame...", 10, 10, 14, 1.0, 1.0, 1.0,

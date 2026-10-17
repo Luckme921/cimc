@@ -18,6 +18,7 @@ from cimc.weld_operator_setup import (  # noqa: E402
     replace_camera_parameters, replace_handeye_parameters,
     inspect_handeye_matrix, viewer_command, camera_direct_environment,
     preview_failure_explanation,
+    result_preview_command,
 )
 
 
@@ -79,6 +80,19 @@ class OperatorConfigTest(unittest.TestCase):
         self.assertEqual(command[command.index('--exposure') + 1], '15000.0')
         self.assertEqual(command[command.index('--attempts') + 1], '3')
         self.assertEqual(command[command.index('--max-display-points') + 1], '150000')
+        self.assertEqual(command[command.index('--fullscreen') + 1], 'true')
+
+    def test_result_preview_cold_starts_in_session_directory(self):
+        with tempfile.TemporaryDirectory(prefix='operator_result_test_', dir='/tmp') as directory:
+            result = Path(directory) / 'operator_preview_001_result.ply'
+            result.touch()
+            with patch('cimc.weld_operator_setup.shutil.which', return_value='/usr/bin/code'):
+                self.assertEqual(result_preview_command(result), [
+                    '/usr/bin/code', '--new-window', str(result.parent), str(result)])
+            with patch('cimc.weld_operator_setup.shutil.which',
+                       side_effect=lambda name: '/usr/bin/xdg-open' if name == 'xdg-open' else None):
+                self.assertEqual(result_preview_command(result),
+                                 ['/usr/bin/xdg-open', str(result.parent)])
 
     def test_viewer_s_key_imports_roi_before_viewer_exits(self):
         form = self.make_form()
@@ -123,6 +137,23 @@ class OperatorConfigTest(unittest.TestCase):
             form.poll_viewer()
             self.assertFalse(form.viewer_running)
             self.assertIsNone(form.viewer_process)
+
+    def test_viewer_saved_snapshot_does_not_raise_false_camera_error_on_exit(self):
+        form = self.make_form()
+        form.root = Mock()
+        form.status = Mock()
+        form.viewer_process = Mock()
+        form.viewer_process.poll.return_value = 1
+        form.viewer_manifest_time = None
+        form.viewer_saved_this_run = True
+        form.viewer_running = True
+        with tempfile.TemporaryDirectory(prefix='operator_viewer_test_', dir='/tmp') as directory:
+            form.manifest = Path(directory) / 'missing.yaml'
+            with patch('cimc.weld_operator_setup.messagebox.showerror') as error:
+                form.poll_viewer()
+                error.assert_not_called()
+        self.assertFalse(form.viewer_running)
+        self.assertIn('已成功保存', form.status.set.call_args.args[0])
 
     def test_unsafe_rounded_boundary_failure_has_chinese_guidance(self):
         message = preview_failure_explanation(
@@ -179,6 +210,9 @@ class OperatorConfigTest(unittest.TestCase):
         form.handeye_vars['matrix_direction'].value = 'camera_from_tcp'
         form.camera_vars['depth_exposure'].value = '15000'
         form.vars['path.rounded_corner_spacing'].value = '4'
+        form.vars['roi.enable'].value = 'true'
+        form.vars['roi.min_x'].value = '-100.25'
+        form.vars['offset.protruding_left.x'].value = '3.75'
         form.original_text = self.weld_text
         form.original_hash = hashlib.sha256(self.weld_text.encode()).hexdigest()
         form.camera_hash = hashlib.sha256(self.camera_text.encode()).hexdigest()
@@ -214,6 +248,10 @@ class OperatorConfigTest(unittest.TestCase):
             self.assertTrue(form.approved)
             self.assertEqual(active_overrides(form.config_path.read_text())[
                 'path.rounded_corner_spacing'], '4')
+            written = active_overrides(form.config_path.read_text())
+            self.assertEqual(written['roi.enable'], 'true')
+            self.assertEqual(written['roi.min_x'], '-100.25')
+            self.assertEqual(written['offset.protruding_left.x'], '3.75')
             self.assertEqual(yaml.safe_load(form.camera_path.read_text())[
                 'chishine_camera_node']['ros__parameters']['depth_exposure'], 15000)
             self.assertEqual(yaml.safe_load(form.handeye_path.read_text())[

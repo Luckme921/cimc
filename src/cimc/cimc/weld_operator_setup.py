@@ -94,6 +94,7 @@ def viewer_command(executable, save_directory, manifest, camera_params, roi_valu
                '--save-dir', str(save_directory), '--snapshot-manifest', str(manifest),
                # Display decimation never changes the complete S-key PLY.
                '--point-size', '2', '--max-display-points', '150000',
+               '--fullscreen', 'true',
                '--roi', roi_values['roi.enable']]
     for key in ROI_KEYS[1:]:
         value = roi_values[key]
@@ -106,6 +107,33 @@ def viewer_command(executable, save_directory, manifest, camera_params, roi_valu
         if key in camera_params:
             command += [flag, str(camera_params[key])]
     return command
+
+
+def maximize_window(window):
+    """Fill the display on X11, with a geometry fallback for other Tk WMs."""
+    try:
+        window.attributes('-zoomed', True)
+    except tk.TclError:
+        try:
+            window.state('zoomed')
+        except tk.TclError:
+            window.geometry(f'{window.winfo_screenwidth()}x{window.winfo_screenheight()}+0+0')
+    window.lift()
+    window.focus_force()
+
+
+def result_preview_command(path):
+    """Cold-start Code in this result directory, never in the source workspace."""
+    result = Path(path).resolve(strict=True)
+    if result.suffix.lower() != '.ply':
+        raise ValueError(f'结果预览文件不是 PLY：{result}')
+    code = shutil.which('code')
+    if code:
+        return [code, '--new-window', str(result.parent), str(result)]
+    opener = shutil.which('xdg-open')
+    if opener:
+        return [opener, str(result.parent)]
+    raise FileNotFoundError('未找到 VS Code 或系统文件管理器（xdg-open）')
 
 
 def camera_direct_environment():
@@ -280,6 +308,10 @@ class PreviewWindow:
         self.window = tk.Toplevel(parent)
         self.window.title(f'焊缝结果核对：{len(rows)} 个点')
         self.window.geometry('1280x650')
+        self.window.transient(parent)
+        maximize_window(self.window)
+        self.window.protocol('WM_DELETE_WINDOW', self.close)
+        self.parent = parent
         frame = ttk.Frame(self.window, padding=10)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text=(
@@ -298,6 +330,8 @@ class PreviewWindow:
         selector.bind('<<ComboboxSelected>>', lambda _event: self.populate())
         ttk.Button(controls, text='在 VS Code 打开原始 result.ply',
                    command=lambda: self.open_ply(result_ply)).pack(side='left', padx=8)
+        ttk.Button(controls, text='打开本次结果文件夹',
+                   command=self.open_result_directory).pack(side='left', padx=8)
         ttk.Button(controls, text='高亮选中点并在 VS Code 打开',
                    command=self.highlight_selected).pack(side='left', padx=8)
         ttk.Button(controls, text='复制原始 PLY 路径',
@@ -367,16 +401,28 @@ class PreviewWindow:
         self.detail.set('已复制原始 result.ply 路径；可直接粘贴到 VS Code 打开。')
 
     def open_ply(self, path):
-        code = shutil.which('code')
-        if not code:
-            messagebox.showinfo('请手动打开 PLY', f'未找到 VS Code 命令，请打开：\n{path}',
-                                parent=self.window)
+        try:
+            subprocess.Popen(result_preview_command(path),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('打开 PLY 失败', str(exc), parent=self.window)
+
+    def open_result_directory(self):
+        opener = shutil.which('xdg-open')
+        if not opener:
+            messagebox.showerror('打开结果文件夹失败', '系统未找到 xdg-open',
+                                 parent=self.window)
             return
         try:
-            subprocess.Popen([code, '--reuse-window', str(path)],
+            subprocess.Popen([opener, str(self.result_ply.parent)],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as exc:
-            messagebox.showerror('打开 PLY 失败', str(exc), parent=self.window)
+            messagebox.showerror('打开结果文件夹失败', str(exc), parent=self.window)
+
+    def close(self):
+        self.window.destroy()
+        self.parent.lift()
+        self.parent.focus_force()
 
     def highlight_selected(self):
         try:
@@ -435,6 +481,7 @@ class SetupWindow:
         self.root.title('华南理工大学智能焊接实验室 · 焊缝任务启动前确认')
         self.root.geometry('1060x760')
         self.root.minsize(870, 620)
+        maximize_window(self.root)
         self.root.protocol('WM_DELETE_WINDOW', self.cancel)
         style = ttk.Style(self.root)
         if 'clam' in style.theme_names():
@@ -480,7 +527,14 @@ class SetupWindow:
 
         outer = ttk.Frame(self.root, padding=18)
         outer.pack(fill='both', expand=True)
-        ttk.Label(outer, text='华南理工大学智能焊接实验室', style='Brand.TLabel').pack(anchor='w')
+        header = tk.Frame(outer, background='#102a3b', padx=22, pady=15)
+        header.pack(fill='x', pady=(0, 9))
+        tk.Label(header, text='华南理工大学智能焊接实验室',
+                 font=('Noto Sans CJK SC', 26, 'bold'), foreground='#f4fafc',
+                 background='#102a3b', anchor='w').pack(fill='x')
+        tk.Label(header, text='INTELLIGENT WELDING  /  OPERATOR CONSOLE',
+                 font=('DejaVu Sans', 11, 'bold'), foreground='#62c8c5',
+                 background='#102a3b', anchor='w').pack(fill='x', pady=(3, 0))
         ttk.Label(outer, text='焊缝任务启动前确认', style='Title.TLabel').pack(anchor='w', pady=(2, 0))
         ttk.Label(outer, text='① 点云与相机  →  ② 焊缝参数  →  ③ 手眼标定复核  →  ④ 预览并确认  →  运行状态窗',
                   style='Muted.TLabel').pack(anchor='w', pady=(3, 8))
@@ -749,7 +803,7 @@ class SetupWindow:
                 f'手眼待写入 {len(handeye_changes)} 项：{", ".join(handeye_changes) if handeye_changes else "无"}\n'
                 '只有最终确认后才写入相应 src 配置 YAML。')
         else:
-            self.pending.set('当前输入与启动时两份 YAML 一致；确认时不会重写配置文件。')
+            self.pending.set('当前输入与启动时三份 YAML 一致；确认时不会重写配置文件。')
         preview_needed = bool(changes or self.ply is not None)
         try:
             preview_current = self.preview_signature == self.signature(
@@ -926,12 +980,18 @@ class SetupWindow:
             return
         self.viewer_process = None
         self.viewer_running = False
+        self.root.lift()
+        self.root.focus_force()
         if returncode != 0:
-            messagebox.showerror(
-                '相机预览失败',
-                f'实时查看器退出（代码 {returncode}）。请确认相机已上电、'
-                '网络 192.168.3.99 可达且没有另一个相机进程占用；'
-                '若仍显示 devices=0，请查看终端中的 SDK 枚举信息后重试。')
+            if self.viewer_saved_this_run:
+                self.status.set(
+                    f'ROI/PLY 已成功保存并回填；查看器退出码 {returncode} 异常，'
+                    '本次结果仍可离线预览。若反复出现，请保留终端日志排查窗口退出。')
+            else:
+                messagebox.showerror(
+                    '相机预览失败',
+                    f'实时查看器退出（代码 {returncode}），且本次未保存新 PLY。'
+                    '请检查相机连接、SDK 终端日志后重试。', parent=self.root)
         elif not self.viewer_saved_this_run:
             self.status.set('预览已退出但没有新保存的 PLY；仍使用之前选择的点云。')
 
