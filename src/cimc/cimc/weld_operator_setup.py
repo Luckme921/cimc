@@ -144,6 +144,17 @@ def camera_direct_environment():
     return environment
 
 
+def viewer_log_tail(path):
+    """Read only the end of a viewer log, even after a long preview session."""
+    try:
+        with Path(path).open('rb') as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 4096))
+            return stream.read().decode('utf-8', errors='replace').strip()[-1200:]
+    except OSError:
+        return ''
+
+
 def active_overrides(config_text):
     data = yaml.safe_load(config_text)
     items = data['weld_seam_node']['ros__parameters']['algorithm_overrides']
@@ -462,6 +473,7 @@ class SetupWindow:
         self.session = workspace / 'operator_sessions' / time.strftime('%Y%m%d_%H%M%S')
         self.session.mkdir(parents=True, exist_ok=True)
         self.manifest = self.session / 'viewer_snapshot.yaml'
+        self.viewer_log = self.session / 'live_viewer.log'
         self.ply = None
         self.viewer_running = False
         self.viewer_process = None
@@ -938,8 +950,10 @@ class SetupWindow:
                 self.manifest.stat().st_mtime_ns if self.manifest.is_file() else None)
             self.viewer_saved_this_run = False
             self.status.set('请在点云窗口按 T/B、X/Y/Z、N/M、[ ] 调 ROI；按 S 后这里会自动回填，按 Q 退出。')
-            self.viewer_process = subprocess.Popen(
-                command, env=camera_direct_environment())
+            with self.viewer_log.open('w', encoding='utf-8') as log:
+                self.viewer_process = subprocess.Popen(
+                    command, env=camera_direct_environment(),
+                    stdout=log, stderr=subprocess.STDOUT)
             self.viewer_running = True
             self.root.after(200, self.poll_viewer)
         except Exception as exc:
@@ -983,15 +997,19 @@ class SetupWindow:
         self.root.lift()
         self.root.focus_force()
         if returncode != 0:
+            detail = viewer_log_tail(self.viewer_log)
+            reason = ('查看器发生段错误（可能是显卡/VTK 窗口问题）。'
+                      if returncode == -11 else '查看器启动或运行失败。')
             if self.viewer_saved_this_run:
                 self.status.set(
                     f'ROI/PLY 已成功保存并回填；查看器退出码 {returncode} 异常，'
-                    '本次结果仍可离线预览。若反复出现，请保留终端日志排查窗口退出。')
+                    f'本次结果仍可离线预览。日志：{self.viewer_log}')
             else:
                 messagebox.showerror(
                     '相机预览失败',
-                    f'实时查看器退出（代码 {returncode}），且本次未保存新 PLY。'
-                    '请检查相机连接、SDK 终端日志后重试。', parent=self.root)
+                    f'{reason}\n退出码：{returncode}\n'
+                    f'日志：{self.viewer_log}\n\n{detail or "日志没有更多输出"}',
+                    parent=self.root)
         elif not self.viewer_saved_this_run:
             self.status.set('预览已退出但没有新保存的 PLY；仍使用之前选择的点云。')
 

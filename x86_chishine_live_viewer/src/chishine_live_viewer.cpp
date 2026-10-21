@@ -898,9 +898,6 @@ void runViewer(const Options& options)
 
     auto viewer = pcl::make_shared<pcl::visualization::PCLVisualizer>(
         "Chishine3D Live Point Cloud");
-    if (options.fullscreen) {
-        viewer->setFullScreen(true);
-    }
     viewer->setBackgroundColor(0.04, 0.04, 0.06);
     viewer->addCoordinateSystem(100.0);
     viewer->addText("Waiting for depth frame...", 10, 10, 14, 1.0, 1.0, 1.0,
@@ -916,6 +913,17 @@ void runViewer(const Options& options)
     if (viewer->getRenderWindow() &&
         viewer->getRenderWindow()->GetInteractor()) {
         viewer->getRenderWindow()->GetInteractor()->Initialize();
+    }
+    if (options.fullscreen && viewer->getRenderWindow()) {
+        // Avoid VTK's exclusive X11 fullscreen switch during interactor
+        // construction, a possible cause of immediate window exit on this
+        // PCL/VTK build. Fill the desktop with a normal window instead.
+        auto window = viewer->getRenderWindow();
+        const int* screen = window->GetScreenSize();
+        if (screen && screen[0] > 0 && screen[1] > 0) {
+            window->SetPosition(0, 0);
+            window->SetSize(screen[0], screen[1]);
+        }
     }
 
     bool cloud_added = false;
@@ -1087,6 +1095,7 @@ int main(int argc, char** argv)
 {
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+    std::cout << std::unitbuf;
     try {
         runViewer(parseOptions(argc, argv));
         return 0;

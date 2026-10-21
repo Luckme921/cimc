@@ -18,7 +18,7 @@ from cimc.weld_operator_setup import (  # noqa: E402
     replace_camera_parameters, replace_handeye_parameters,
     inspect_handeye_matrix, viewer_command, camera_direct_environment,
     preview_failure_explanation,
-    result_preview_command,
+    result_preview_command, viewer_log_tail,
 )
 
 
@@ -149,11 +149,32 @@ class OperatorConfigTest(unittest.TestCase):
         form.viewer_running = True
         with tempfile.TemporaryDirectory(prefix='operator_viewer_test_', dir='/tmp') as directory:
             form.manifest = Path(directory) / 'missing.yaml'
+            form.viewer_log = Path(directory) / 'live_viewer.log'
             with patch('cimc.weld_operator_setup.messagebox.showerror') as error:
                 form.poll_viewer()
                 error.assert_not_called()
         self.assertFalse(form.viewer_running)
         self.assertIn('已成功保存', form.status.set.call_args.args[0])
+
+    def test_viewer_failure_shows_actual_sdk_error_and_log_path(self):
+        form = self.make_form()
+        form.root = Mock()
+        form.status = Mock()
+        form.viewer_process = Mock()
+        form.viewer_process.poll.return_value = 1
+        form.viewer_manifest_time = None
+        form.viewer_saved_this_run = False
+        form.viewer_running = True
+        with tempfile.TemporaryDirectory(prefix='operator_viewer_test_', dir='/tmp') as directory:
+            form.manifest = Path(directory) / 'missing.yaml'
+            form.viewer_log = Path(directory) / 'live_viewer.log'
+            form.viewer_log.write_text('Discovery 1/3: devices=0\nError: No camera found\n')
+            self.assertIn('No camera found', viewer_log_tail(form.viewer_log))
+            with patch('cimc.weld_operator_setup.messagebox.showerror') as error:
+                form.poll_viewer()
+                message = error.call_args.args[1]
+                self.assertIn('No camera found', message)
+                self.assertIn(str(form.viewer_log), message)
 
     def test_unsafe_rounded_boundary_failure_has_chinese_guidance(self):
         message = preview_failure_explanation(
