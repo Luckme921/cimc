@@ -3,6 +3,8 @@ data_receiver_node:
     # ABB 机器人作为 TCP 客户端连接本机。
     listen_host: "192.168.3.100"
     listen_port: 45000
+    # 设备网卡未接通/未配置本机IP时等待并重试，不自动改IP或监听全部网卡。
+    listen_retry_seconds: 3.0
     abb_allowed_ip: "192.168.3.2"
     # ABB ASCII 指令必须以 \n（或 \r\n）结尾；用于限制单行长度。
     abb_max_line_bytes: 4096

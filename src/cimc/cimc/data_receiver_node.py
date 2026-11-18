@@ -2,6 +2,7 @@
 import rclpy
 from rclpy.node import Node
 import json
+import errno
 import math
 import socket
 import threading
@@ -15,6 +16,17 @@ from geometry_msgs.msg import Point
 
 
 THIRD_PARTY_PROTOCOL_VERSION = 1
+
+
+def explain_listen_error(error, host, port):
+    if getattr(error, 'errno', None) == errno.EADDRNOTAVAIL:
+        return ('waiting_address',
+                f'本机尚无监听地址 {host}:{port}，ABB暂时无法连接；'
+                '请接通设备网卡并配置对应本机IP。纯离线PLY预览不受影响，'
+                '可用workflow_mode:=offline；不会自动改网卡或改为监听全部地址。')
+    if getattr(error, 'errno', None) == errno.EADDRINUSE:
+        return ('listen_error', f'端口 {host}:{port} 已被占用；请勿同时运行两套ABB launch。')
+    return ('listen_error', f'ABB监听失败 {host}:{port}：{error}；请检查网络与权限。')
 
 
 def encode_protocol_frame(frame):
@@ -147,6 +159,7 @@ class DataReceiverNode(Node):
         # 必须把状态变量放在最前面，防止后面的线程启动时找不到该变量而崩溃！
         self.is_running = True
         self.server_socket = None
+        self.listen_stop_event = threading.Event()
         # ABB is the TCP client, therefore all outbound robot data must reuse
         # the accepted socket owned by this node. A second ROS node must not
         # bind the same listen address/port.
@@ -164,6 +177,9 @@ class DataReceiverNode(Node):
         self.host = self.declare_parameter(
             'listen_host', '192.168.3.100').value
         self.port = int(self.declare_parameter('listen_port', 45000).value)
+        self.listen_retry_seconds = float(self.declare_parameter('listen_retry_seconds', 3.0).value)
+        if not math.isfinite(self.listen_retry_seconds) or not 0.2 <= self.listen_retry_seconds <= 60:
+            raise ValueError('listen_retry_seconds must be within 0.2..60 seconds')
         self.target_ip = self.declare_parameter(
             'abb_allowed_ip', '192.168.3.2').value
         self.abb_max_line_bytes = int(self.declare_parameter(
@@ -299,7 +315,7 @@ class DataReceiverNode(Node):
         self.abb_sender_thread.daemon = True
         self.abb_sender_thread.start()
 
-        self.get_logger().info(f"ABB 数据接收节点已启动，纯文本模式监听: {self.host}:{self.port} ...")
+        self.get_logger().info(f"ABB接收节点已启动，准备绑定: {self.host}:{self.port}（监听成功另行提示）")
         if self.third_party_link_enabled:
             self.get_logger().info(
                 f"第三方 JSONL v{THIRD_PARTY_PROTOCOL_VERSION} 双向通道: "
@@ -505,9 +521,10 @@ class DataReceiverNode(Node):
         status.data = ('OK:' if success else 'ERROR:') + message
         self.abb_tx_status_pub.publish(status)
 
-    def publish_abb_connection_status(self, state, peer=''):
+    def publish_abb_connection_status(self, state, peer='', message='', retry_seconds=0):
         status = String()
-        status.data = json.dumps({'state': state, 'peer': peer},
+        status.data = json.dumps({'state': state, 'peer': peer, 'message': message,
+                                  'retry_seconds': retry_seconds},
                                  ensure_ascii=False, separators=(',', ':'))
         self.abb_connection_status_pub.publish(status)
 
@@ -686,15 +703,47 @@ class DataReceiverNode(Node):
             except Exception as e:
                 self.get_logger().error(f"解析失败: {msg}, 错误: {e}")
 
+    def open_abb_listener(self):
+        """Wait for the configured local address; never widen the bind address."""
+        last_error = None
+        last_log = 0.0
+        while rclpy.ok() and self.is_running:
+            candidate = None
+            try:
+                candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                candidate.bind((self.host, self.port))
+                candidate.listen(1)
+                candidate.settimeout(1.0)
+                if not self.is_running:
+                    candidate.close()
+                    return False
+                self.server_socket = candidate
+                self.publish_abb_connection_status('listening')
+                self.get_logger().info(f'ABB TCP监听成功：{self.host}:{self.port}，等待机器人连接。')
+                return True
+            except OSError as error:
+                if candidate is not None:
+                    candidate.close()
+                if not self.is_running or not rclpy.ok():
+                    return False
+                state, message = explain_listen_error(error, self.host, self.port)
+                self.publish_abb_connection_status(state, message=message,
+                                                   retry_seconds=self.listen_retry_seconds)
+                signature = (state, getattr(error, 'errno', None))
+                now = time.monotonic()
+                if signature != last_error or now-last_log >= 60:
+                    self.get_logger().warn(message + f' 每{self.listen_retry_seconds:g}秒自动重试。')
+                    last_error, last_log = signature, now
+                if self.listen_stop_event.wait(self.listen_retry_seconds):
+                    return False
+        return False
+
     def tcp_server_loop(self):
         """主接收循环：接收 ABB 数据，存入队列并解析"""
         try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind((self.host, self.port))
-            self.server_socket.listen(1)
-            self.server_socket.settimeout(1.0)
-            self.publish_abb_connection_status('listening')
+            if not self.open_abb_listener():
+                return
 
             while rclpy.ok() and self.is_running:
                 try:
@@ -759,8 +808,9 @@ class DataReceiverNode(Node):
                 except socket.timeout:
                     pass
         except Exception as e:
-            self.get_logger().error(f"Socket 启动失败: {e}")
-            self.publish_abb_connection_status('listen_error')
+            if self.is_running and rclpy.ok():
+                self.get_logger().error(f"ABB Socket接收循环异常: {e}")
+                self.publish_abb_connection_status('listen_error', message=str(e))
         finally:
             if self.server_socket:
                 self.server_socket.close()
@@ -848,6 +898,7 @@ class DataReceiverNode(Node):
     def destroy_node(self):
         self.stop_after_third_party_disconnect()
         self.is_running = False
+        self.listen_stop_event.set()
         with self.abb_connection_lock:
             connection = self.abb_connection
             self.abb_connection = None

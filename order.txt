@@ -925,9 +925,9 @@ python3 scripts/offline_weld.py \
 # 其他临时参数示例：--set gooseneck.corner_2.dx=1.5
 # --set gooseneck.corner_2.pitch=5 --set gooseneck.vertical_length_mm=30
 # 侧板外倾：gooseneck.side_lean_deg=10（0~20°），左侧向左、右侧向右。
-# 当前鹅颈槽YAML选10°为待现场验收候选；工具X取最近正交投影，会小幅偏转。
+# 此10°是1.0.2版历史对照；当前1.1.0推荐模式见第17节。
 # 整体抬枪：gooseneck.body_tilt_deg=0（-30~30°）；+远离底板，-远离前立面。
-# 两项设0可复现旧共享姿态；这两项只改姿态，不移动TCP点，不能替代防撞检查。
+# shared模式下两项设0可复现旧共享姿态；只改姿态，不移动TCP点，不能替代防撞检查。
 # 白线为TCP→枪体；当tool_z_to_body=false时，与工具+Z相反。
 # 双槽样本选第二槽：文件用live_20261104_160017_391.ply，并加
 # --set gooseneck.groove_index=2；一次仍只输出8点。
@@ -957,3 +957,35 @@ source /home/mini/x86_ros2_ws/install/setup.bash
 python3 gooseneck_weld/tests/regression.py
 # 隔离ROS域224，只启动算法节点+测试订阅器，对比ROS和离线结果：
 # python3 src/weld_seam_perception/test/offline_backends.py
+
+# ==================== 17. 2026-11-18 工件分栏与鹅颈槽左右让枪 ====================
+# 软件离线入口（无硬件可用；不启动ABB监听、ROS相机、手眼或任务节点）：
+source /opt/ros/humble/setup.bash
+source /home/mini/x86_ros2_ws/install/setup.bash
+ros2 launch cimc camera_weld_operator_abb.launch.py \
+  workflow_mode:=offline \
+  weld_params_file:=/home/mini/x86_ros2_ws/src/weld_seam_perception/config/gooseneck.yaml
+# 1 工件与系统公共设置：工件选择、历史PLY/ROI、相机曝光、手眼/TCP、只读网络信息。
+# 2 波纹板参数：仅波纹板的姿态、路径、分组点位偏移。
+# 3 鹅颈槽参数：仅鹅颈槽的长度、安全退距、姿态模式及8点独立位姿补偿。
+# 4 复核与启动：核对实际写入路径与改动；离线模式按钮为保存并退出，不自动运行设备。
+# 选择历史PLY -> 鹅颈槽页核对orientation_mode=joint_bisector -> 离线预览。
+# 修改参数后应再次预览；预览本身不写正式YAML，最终确认才写入并回读校验。
+# 从旧波纹板配置首次选鹅颈槽时，仅未配置且未手改的鹅颈槽参数载入专用推荐值；
+# 已有鹅颈槽参数不被自动覆盖。旧窗口需关闭重开；已有旧参数请手动选择joint_bisector。
+# joint_bisector：竖缝按两侧外法向角平分让枪；底部转角按三面外法向合成。
+# 左4点向左、右4点向右；side_lean_deg=0是无额外修正，不代表shared旧姿态。
+# tool_x_positive=true、tool_z_to_body=false保持当前TCP方向约定；白线为TCP->枪体，
+# 与工具+Z相反。大幅左右倾斜时工具X必须正交调整，不可能与原固定X严格相同。
+# orientation_mode=shared且body_tilt_deg=0、side_lean_deg=0可恢复原共享姿态。
+# 单槽部分侧面支撑不足会WARNING并用参考法向估计；人工必须核对，不等于防撞通过。
+# 本次4份数据/6槽、3种姿态对照，均为同一组XYZ：
+# /home/mini/x86_ros2_ws/operator_sessions/gooseneck_joint_bisector_20261118/
+# single_slot1_joint_result.ply=新模式；single_slot1_side10_result.ply=旧10度；
+# single_slot1_original_result.ply=原共享姿态；其他文件按double等前缀对应槽位。
+# 现场人工入口仍省略workflow_mode（默认manual）；固定夹具用workflow_mode:=fixed。
+# 旧camera_weld_handeye_abb_test.launch.py仍保留；任何两个完整链路不要同时运行。
+# Errno99/Cannot assign requested address：本机缺少192.168.3.100，ABB当时不能通讯。
+# 节点现在会按配置每3秒等待重试，不改网卡、不改监听地址；真实网卡配置正确后恢复。
+# 不连接硬件时用offline，不要为消除99而把IP改成ABB机器人的192.168.3.2。
+# 本次仅软件/离线验证；尚未进行真实硬件验证。新姿态首次真机必须人工低速核验。

@@ -85,6 +85,34 @@ def check_tilt_and_lean(cloud, out, original, slot=1):
     assert abs(max_turn-20) < 1e-5
 
 
+def check_joint_bisectors(cloud, out, original, slot=1):
+    joint = run(cloud, out, f'joint_{slot}', f'gooseneck.groove_index={slot}',
+                'gooseneck.orientation_mode=joint_bisector')
+    points = np.array([[float(row[f'raw_{k}']) for k in 'xyz'] for row in joint])
+    heights = np.array([float(row['raw_workpiece_z']) for row in joint])
+    up = np.linalg.lstsq(np.c_[points, np.ones(8)], heights, rcond=None)[0][:3]
+    up /= np.linalg.norm(up)
+    reference_x = axes(original[0])[:, 0]
+    for i, (before, after) in enumerate(zip(original, joint)):
+        np.testing.assert_allclose([float(before[k]) for k in 'xyz'],
+                                   [float(after[k]) for k in 'xyz'], atol=1e-9)
+        rotation = axes(after)
+        side = np.array([float(after[f'side_normal_{k}']) for k in 'xyz'])
+        reference = np.array([float(after[f'joint_reference_normal_{k}']) for k in 'xyz'])
+        body = np.array([float(after[f'world_torch_body_axis_{k}']) for k in 'xyz'])
+        count = 2 if i in (0,1,6,7) else 3
+        expected = side + reference + (up if count == 3 else 0)
+        expected /= np.linalg.norm(expected)
+        np.testing.assert_allclose(body, expected, atol=1e-8)
+        assert int(after['joint_surface_count']) == count
+        assert body @ side > 0.4
+        assert (body @ reference_x)*(-1 if i<=3 else 1) > 0.3
+        assert rotation[:, 0] @ reference_x > 0.5, 'tool X must retain reference sign'
+        assert after['pose_source'] == 'joint_normal_bisector'
+    print(f'PASS: joint bisectors slot{slot}, measured sides='
+          f'{joint[0]["side_normal_source"]}/{joint[7]["side_normal_source"]}')
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='gooseneck_regression_') as folder:
         out = Path(folder)
@@ -93,6 +121,7 @@ def main():
         current = run(ply, out, 'current_default')
         assert current == original, 'SDK zero-adjustment default must preserve portable +X'
         check_tilt_and_lean(ply, out, original)
+        check_joint_bisectors(ply, out, original)
         for key, value in (('body_tilt_deg', '31'), ('body_tilt_deg', 'nan'),
                            ('side_lean_deg', '-1'), ('side_lean_deg', '21')):
             rejected = subprocess.run([str(SDK), str(ply), str(out), 'rejected_angle',
@@ -172,6 +201,7 @@ def main():
                     assert all(abs(float(a[k])-float(b[k])) < 1e-7 for k in 'xyz')
                     assert abs(quaternion(a) @ quaternion(b)) > 1 - 1e-8
                 check_tilt_and_lean(cloud, out, actual, slot)
+                check_joint_bisectors(cloud, out, actual, slot)
             print(f'PASS: {stem}, {count} groove(s), every slot matches portable SDK')
         for stem in ('live_20261104_161852_937', 'live_20261104_170234_609'):
             cloud = DATA / f'{stem}.ply'

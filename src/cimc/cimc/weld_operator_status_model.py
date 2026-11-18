@@ -45,9 +45,12 @@ class StatusModel:
                 'connected': '已连接',
                 'disconnected': '已断开',
                 'listen_error': '监听失败',
+                'waiting_address': '等待本机设备网卡IP（ABB未就绪，离线预览可用）',
             }.get(state, str(state))
             if state == 'connected':
                 self.connection += f" · {body.get('peer', '')}"
+            if body.get('message'):
+                self.connection += f" · {body['message']}"
             summary = self.connection
         elif topic == '/abb/raw_text':
             self.received = summary

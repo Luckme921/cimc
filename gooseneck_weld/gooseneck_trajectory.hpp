@@ -32,6 +32,7 @@ struct Offset {
 
 struct Options {
  double clearance = 30;
+ bool jointBisectors = false;
  // Signed correction from the original bisector: positive tilts physical body
  // toward the base normal, independent of the chosen tool X/Z signs.
  double bodyTiltDegrees = 0;
@@ -104,13 +105,22 @@ inline V nearest(const std::vector<Sample>& points,double x,double y,double heig
 
 struct Trajectory {
  std::array<V,8> position{},nominal{},body{},toolX{},toolY{},toolZ{};
+ std::array<V,8> sideNormal{};
+ std::array<V,8> jointReferenceNormal{};
+ std::array<bool,8> sideNormalMeasured{};
+ std::array<int,8> jointSurfaceCount{};
  std::array<Quaternion,8> orientation{};
+};
+
+struct SidePlanes {
+ std::array<V,2> outward{};
+ std::array<bool,2> measured{};
 };
 
 inline Trajectory makeTrajectory(const Samples& samples,
  const std::vector<double>& left,const std::vector<double>& right,
  const std::vector<double>& bend,double depth,double height,
- V along,V wall,V front,V base,const Options& options){
+ V along,V wall,V front,V base,const Options& options,const SidePlanes& sides={}){
  if(samples[0].empty()||samples[1].empty()||samples[2].empty())
   throw std::runtime_error("Missing vertical or bottom seam samples");
  const auto top=[](const std::vector<Sample>& points){
@@ -170,7 +180,26 @@ inline Trajectory makeTrajectory(const Samples& samples,
  const V exitRetreat=retreatDirection(wall+along,p[6]-p[5],options.offsets[6].angles);
  for(int i=0;i<8;++i){
   auto frame=sharedFrame;
-  if(options.sideLeanDegrees!=0){
+  const int side=i<=3?0:1;
+  const V outward=sides.outward[side].norm()>0.5?unit(sides.outward[side]):unit(along)*(side==0?-1:1);
+  path.sideNormal[i]=outward;
+  path.sideNormalMeasured[i]=sides.measured[side];
+  if(options.jointBisectors){
+   // Vertical joints: exact bisector of two outward face normals. Bottom
+   // corners meet three faces: equal-normal trihedral clearance direction.
+   const bool vertical=i<=1||i>=6;
+   path.jointReferenceNormal[i]=unit(vertical?wall:(i==2||i==5?wall:front));
+   V body=unit(outward+path.jointReferenceNormal[i]+
+               (vertical?V{0,0,0}:unit(base)));
+   path.jointSurfaceCount[i]=vertical?2:3;
+   if(options.bodyTiltDegrees!=0)
+    body=unit(rotate(body,unit(body.cross(unit(base))),options.bodyTiltDegrees));
+   if(options.sideLeanDegrees!=0)
+    body=unit(rotate(body,unit(body.cross(outward)),options.sideLeanDegrees));
+   const V z=body*bodySign;
+   const V x=unit(seamX-z*seamX.dot(z));
+   frame={x,unit(z.cross(x)),z};
+  }else if(options.sideLeanDegrees!=0){
    const double a=options.sideLeanDegrees*std::acos(-1.0)/180;
    const V body=unit(sharedBody*std::cos(a)+transverse*((i<=3?-1:1)*std::sin(a)));
    const V z=body*bodySign;

@@ -16,6 +16,7 @@ GOOSENECK_DEFAULTS = {
     'gooseneck.tool_z_to_body': 'false',
     'gooseneck.body_tilt_deg': '0',
     'gooseneck.side_lean_deg': '0',
+    'gooseneck.orientation_mode': 'shared',
     **{f'gooseneck.{role}.{field}': '0'
        for role, _ in GOOSENECK_ROLES for field in GOOSENECK_FIELDS},
 }
@@ -24,6 +25,10 @@ GOOSENECK_DEFAULTS = {
 def validate_gooseneck(values):
     for key, default in GOOSENECK_DEFAULTS.items():
         value = str(values.get(key, default)).strip()
+        if key == 'gooseneck.orientation_mode':
+            if value not in ('shared', 'joint_bisector'):
+                raise ValueError('鹅颈槽姿态模式必须为 shared / joint_bisector')
+            continue
         if default in ('true', 'false'):
             if value not in ('true', 'false'):
                 raise ValueError(f'{key} 必须为 true / false')

@@ -84,15 +84,18 @@ class GooseneckTcpContractTest(unittest.TestCase):
             with (Path(folder) / 'replay_features.csv').open(newline='') as stream:
                 cls.rows = list(csv.DictReader(stream))
 
-    def test_default_axes_match_existing_tcp_reference_on_recorded_fixture(self):
+    def test_default_axes_preserve_reference_sign_and_physical_z_convention(self):
         self.assertEqual(self.settings['gooseneck.tool_x_positive'], 'true')
         self.assertEqual(self.settings['gooseneck.tool_z_to_body'], 'false')
         capture_axes = self.calibration[:3, :3].T
         for row in self.rows:
             rotation = quaternion_to_rotation(*(float(row[key]) for key in ('qx', 'qy', 'qz', 'qw')))
             # Fixture-specific checks: avoid the previously introduced 180° X flip.
-            self.assertGreater(float(rotation[:, 0] @ capture_axes[:, 0]), 0.9)
-            self.assertGreater(float(rotation[:, 2] @ capture_axes[:, 2]), 0.9)
+            # Joint-aware outward lean intentionally rotates the axes; proximity
+            # to the old capture Z is no longer an acceptance requirement.
+            self.assertGreater(float(rotation[:, 0] @ capture_axes[:, 0]), 0.4)
+            np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-9)
+            self.assertAlmostEqual(float(np.linalg.det(rotation)), 1.0)
             body = np.array([float(row[f'world_torch_body_axis_{axis}']) for axis in 'xyz'])
             np.testing.assert_allclose(rotation[:, 2], -body, atol=1e-9)
 

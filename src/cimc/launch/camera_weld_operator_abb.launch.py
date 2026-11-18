@@ -77,6 +77,15 @@ def _manual_runtime(context, event, *args):
 
 def _select_mode(context, *args):
     mode, workspace, camera, weld, handeye, coordinator, receiver, echo, status_window = args
+    if context.perform_substitution(mode) == 'offline':
+        setup = ExecuteProcess(
+            cmd=['python3', PathJoinSubstitution([
+                workspace, 'src', 'cimc', 'cimc', 'weld_operator_setup.py']),
+                '--offline', workspace, weld, camera, handeye],
+            name='weld_operator_offline', output='screen')
+        return [LogInfo(msg='纯离线模式：只开参数/历史PLY界面，不启动ABB、相机或任何ROS业务节点。'),
+                RegisterEventHandler(OnProcessExit(target_action=setup,
+                    on_exit=[EmitEvent(event=Shutdown(reason='offline review finished'))])), setup]
     if context.perform_substitution(mode) == 'fixed':
         old_launch = Path(context.perform_substitution(workspace)) / (
             'src/cimc/launch/camera_weld_handeye_abb_test.launch.py')
@@ -131,7 +140,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('workspace_root', default_value='/home/mini/x86_ros2_ws'),
         DeclareLaunchArgument('workflow_mode', default_value='manual',
-                              choices=['manual', 'fixed']),
+                              choices=['manual', 'fixed', 'offline']),
         DeclareLaunchArgument('echo_topics', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('show_operator_status', default_value='true',

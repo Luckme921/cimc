@@ -77,6 +77,7 @@ source /home/mini/x86_ros2_ws/install/setup.bash
 
 | 模式 | 命令 | 用途 |
 | --- | --- | --- |
+| 纯离线界面 | `ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=offline` | 只开参数/历史PLY窗口，不启动相机、ABB监听或ROS业务节点；确认只保存配置 |
 | 人工复核（默认） | `ros2 launch cimc camera_weld_operator_abb.launch.py` | 可选历史 PLY 或实时相机 ROI；预览后确认配置，之后连续处理 ABB 请求 |
 | 固定夹具 | `ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=fixed` | 直接使用已确认的 YAML，不打开标定窗口 |
 | 旧的无 ABB 输出测试 | `ros2 launch cimc camera_weld_handeye_test.launch.py` | 仅在其独立安全配置满足预检时使用；不是当前 ABB 主链路 |
@@ -84,6 +85,8 @@ source /home/mini/x86_ros2_ws/install/setup.bash
 总 launch 默认 `echo_topics:=false`、`show_operator_status:=true`、`use_shared_memory:=true`。`show_operator_status` 仅对人工模式有效；需要终端逐话题日志可设 `echo_topics:=true`。Fast DDS 的 `DEFAULT` 传输使同机节点优先使用 SHM，并保留 UDPv4 发现/回退；若现场有 DDS 兼容问题，用 `use_shared_memory:=false` 继承原有环境。**不是 SHM-only，也不是点云零拷贝。**
 
 人工模式会先开启 ABB TCP 监听，再等待操作员确认；确认前的 `START_CAPTURE` 不会排队执行。固定模式或直接运行旧 ABB launch 不提供这一人工确认关口。详细操作与安全条件见[人工标定说明](src/cimc/人工标定与自动运行.md)。
+
+参数界面分为“工件与系统公共设置 / 波纹板参数 / 鹅颈槽参数 / 复核与启动”，公共栏目含相机、ROI、手眼与网络只读信息。ABB监听报Errno99说明本机没有所配监听IP，实机收发不可用但离线算法可用；接收节点会保留地址限制并等待重试，不再永久退出监听线程，也不会偷偷改为监听全部网卡。
 
 ## 参数在哪里生效
 

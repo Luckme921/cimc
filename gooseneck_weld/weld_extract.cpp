@@ -247,6 +247,8 @@ Extracted extract(const std::string& path,double verticalLength,const gooseneck:
  std::array<size_t,9> counts{};
  size_t vertical=0,bottom=0;
  std::vector<gooseneck::Samples> seamSamples(trajectory?sections.size():0);
+ std::vector<std::array<std::vector<V>,2>> sideSupport(
+  trajectory&&trajectory->jointBisectors?sections.size():0);
  for(size_t i=0;i<rows.size();++i){
   const V q=local[i];
   int label=0;
@@ -264,6 +266,12 @@ Extracted extract(const std::string& path,double verticalLength,const gooseneck:
     const double side=std::min(std::abs(q.x-left),std::abs(q.x-right));
     const bool onFront=q.y>depth-3.2&&q.y<depth+3.5;
     const bool onSide=q.y>1.5&&q.y<depth-2&&side<4;
+    // Pose-only side-plane support, away from weld fillets and front edges.
+    // It never changes classification, seam sampling or target XYZ.
+    if(!sideSupport.empty()&&onSide&&h>8&&h<verticalLength+12&&q.y>4&&q.y<depth-4){
+     const int which=std::abs(q.x-left)<std::abs(q.x-right)?0:1;
+     sideSupport[index][which].push_back(xyz(rows[i]));
+    }
     if((h>2||!std::isfinite(h))&&onFront)label=4;
     if((h>2||!std::isfinite(h))&&onSide)label=q.x<(left+right)/2?5:6;
     if(label>=4&&label<=6&&side<9&&q.y>depth-8&&q.y<depth-1.5)label=7;
@@ -315,9 +323,34 @@ Extracted extract(const std::string& path,double verticalLength,const gooseneck:
   for(size_t i=0;i<sections.size();++i){
    const auto& section=sections[i];
    try{
+    gooseneck::SidePlanes sides;
+    for(int side=0;side<2;++side){
+     const V reference=axis*(side==0?-1:1);
+     sides.outward[side]=reference;
+     if(!sideSupport.empty()&&sideSupport[i][side].size()>=60){
+      const auto& support=sideSupport[i][side];
+      std::vector<V> subset;
+      const size_t stride=std::max(size_t(1),(support.size()+1199)/1200);
+      for(size_t j=0;j<support.size();j+=stride)subset.push_back(support[j]);
+      auto plane=fit(subset,0.8);
+      if(plane.n.dot(reference)<0)plane.n=plane.n*(-1);
+      if(plane.count>=int(subset.size()*0.65)&&plane.n.dot(reference)>0.90&&
+         std::abs(plane.n.dot(extracted.up))<0.25){
+       sides.outward[side]=plane.n;
+       sides.measured[side]=true;
+      }
+     }
+     if(trajectory->jointBisectors)
+      std::cout<<"U "<<i+1<<" side "<<side<<" outward normal="<<sides.outward[side].x<<','
+       <<sides.outward[side].y<<','<<sides.outward[side].z
+       <<" source="<<(sides.measured[side]?"measured_side_plane":"reference_plane_fallback")<<'\n';
+     if(trajectory->jointBisectors&&!sides.measured[side])
+      std::cout<<"WARNING: U "<<i+1<<(side==0?" 左":" 右")
+       <<"侧板实测平面支撑不足；姿态使用参考横轴估计外法向，须人工核对侧板方向，不能视作防撞通过。\n";
+    }
     paths.push_back(gooseneck::makeTrajectory(seamSamples[i],section.leftEdge,section.rightEdge,
      bend,depth,verticalLength,axis,wall.n*(-1),front.n*(front.n.dot(wall.n)>0?-1:1),
-     floor.n*(heightSum<0?-1:1),*trajectory));
+     floor.n*(heightSum<0?-1:1),*trajectory,sides));
    }catch(const std::exception& error){
     throw std::runtime_error("U "+std::to_string(i+1)+": "+error.what());
    }

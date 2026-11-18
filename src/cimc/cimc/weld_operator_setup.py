@@ -444,6 +444,8 @@ class PreviewWindow:
                 f'YAML：gooseneck.{group}.dx / dy / dz（相机轴 mm）；'
                 f'roll / pitch / yaw（工具局部轴 °）；'
                 f"当前逐点旋转：{row['roll']}/{row['pitch']}/{row['yaw']}°；"
+                f"姿态模式：{row.get('orientation_mode', 'shared')}；"
+                f"侧面法向来源：{row.get('side_normal_source', '旧结果未记录')}；"
                 f"整体抬枪修正：{row.get('body_tilt_deg', '0')}°；"
                 f"侧板外倾：{row.get('side_lean_deg', '0')}°；"
                 f"枪体轴与底板夹角：{row.get('body_angle_to_base_deg', '旧结果未记录')}°。")
@@ -496,8 +498,9 @@ class PreviewWindow:
 
 
 class SetupWindow:
-    def __init__(self, workspace, config_path, camera_path, handeye_path=None):
+    def __init__(self, workspace, config_path, camera_path, handeye_path=None, offline_only=False):
         self.workspace = workspace
+        self.offline_only = offline_only
         self.config_path = config_path
         self.camera_path = camera_path
         self.handeye_path = (handeye_path if handeye_path is not None else
@@ -505,6 +508,7 @@ class SetupWindow:
         self.original_text = config_path.read_text(encoding='utf-8')
         self.original_hash = hashlib.sha256(self.original_text.encode()).hexdigest()
         self.original = active_overrides(self.original_text)
+        self.goose_profile_loaded = any(key.startswith('gooseneck.') for key in self.original)
         self.camera_original_text = camera_path.read_text(encoding='utf-8')
         self.camera_hash = hashlib.sha256(self.camera_original_text.encode()).hexdigest()
         self.handeye_original_text = self.handeye_path.read_text(encoding='utf-8')
@@ -597,28 +601,38 @@ class SetupWindow:
                  font=('DejaVu Sans', 11, 'bold'), foreground='#62c8c5',
                  background='#102a3b', anchor='w').pack(fill='x', pady=(3, 0))
         ttk.Label(outer, text='焊缝任务启动前确认', style='Title.TLabel').pack(anchor='w', pady=(2, 0))
-        ttk.Label(outer, text='① 点云与相机  →  ② 焊缝参数  →  ③ 手眼标定复核  →  ④ 预览并确认  →  运行状态窗',
+        ttk.Label(outer, text='① 工件与公共设置  →  ② 对应工件参数  →  ③ 离线预览  →  ④ 复核确认',
                   style='Muted.TLabel').pack(anchor='w', pady=(3, 8))
-        ttk.Label(outer, text='安全边界：ABB TCP 可先连接；确认前拒绝拍照指令，不缓存旧机器人位姿。',
+        ttk.Label(outer, text=('纯离线：不启动ABB或相机节点；确认只保存配置并退出。'
+                  if self.offline_only else
+                  '安全边界：ABB TCP 可先连接；确认前拒绝拍照指令，不缓存旧机器人位姿。'),
                   style='Safety.TLabel').pack(anchor='w', pady=(0, 12))
+
+        self.algorithm_scope = tk.StringVar()
+        ttk.Label(outer, textvariable=self.algorithm_scope, wraplength=1000,
+                  style='Muted.TLabel').pack(anchor='w', fill='x', pady=(0, 9))
 
         tabs = ttk.Notebook(outer)
         tabs.pack(fill='both', expand=True)
         capture_tab = ttk.Frame(tabs, padding=16)
         offset_tab = ttk.Frame(tabs, padding=16)
-        handeye_tab = ttk.Frame(tabs, padding=16)
+        goose_tab = ttk.Frame(tabs)
         review_tab = ttk.Frame(tabs, padding=16)
-        tabs.add(capture_tab, text='  1  点云与 ROI  ')
-        tabs.add(offset_tab, text='  2  算法与点位偏移  ')
-        tabs.add(handeye_tab, text='  3  手眼标定  ')
+        tabs.add(capture_tab, text='  1  工件与系统公共设置  ')
+        tabs.add(offset_tab, text='  2  波纹板参数  ')
+        tabs.add(goose_tab, text='  3  鹅颈槽参数  ')
         tabs.add(review_tab, text='  4  复核与启动  ')
 
         capture_pages = ttk.Notebook(capture_tab)
         capture_pages.pack(fill='both', expand=True)
+        system_page = ttk.Frame(capture_pages, padding=10)
         roi_page = ttk.Frame(capture_pages, padding=10)
         camera_page = ttk.Frame(capture_pages, padding=10)
+        handeye_tab = ttk.Frame(capture_pages, padding=10)
+        capture_pages.add(system_page, text='  工件选择与公共信息  ')
         capture_pages.add(roi_page, text='  点云与 ROI  ')
         capture_pages.add(camera_page, text='  相机成像参数  ')
+        capture_pages.add(handeye_tab, text='  手眼标定 / TCP  ')
         capture = ttk.LabelFrame(roi_page, text='点云来源', padding=12)
         capture.pack(fill='x', pady=(0, 12))
         ttk.Button(capture, text='实时预览相机并画 ROI',
@@ -656,22 +670,17 @@ class SetupWindow:
             ttk.Label(camera_box, text=key, style='Muted.TLabel').grid(
                 row=row, column=2, padx=(18, 0), sticky='w')
         ttk.Label(camera_page, text=(
-            '实时预览使用上面当前输入的深度参数，网络 true / USB false、显示点大小 2、最多 600000 点；'
+            '实时预览使用上面当前输入的深度参数，网络 true / USB false、显示点大小 2、最多显示 150000 点（保存不降采样）；'
             f'按 S 保存到 {camera_save_directory(self.camera_params)}。最终确认才写入 camera.yaml，ROS 相机节点随后读取。'
             '重拍次数和有效比例仅影响 ROS 拍照节点，不影响实时预览。'),
             style='Muted.TLabel', wraplength=900).pack(anchor='w', pady=(12, 0))
 
-        self.algorithm_scope = tk.StringVar()
-        ttk.Label(offset_tab, textvariable=self.algorithm_scope, wraplength=950,
-                  style='Muted.TLabel').pack(anchor='w', fill='x', pady=(0, 9))
         offset_pages = ttk.Notebook(offset_tab)
         offset_pages.pack(fill='both', expand=True)
         common_page = ttk.Frame(offset_pages, padding=10)
         point_page = ttk.Frame(offset_pages, padding=10)
-        offset_pages.add(common_page, text='  工件选择 / 波纹板参数  ')
+        offset_pages.add(common_page, text='  姿态与路径参数  ')
         offset_pages.add(point_page, text='  波纹板分类点位偏移  ')
-        goose_tab = ttk.Frame(offset_pages)
-        offset_pages.add(goose_tab, text='  鹅颈槽参数与逐点补偿  ')
         goose_canvas = tk.Canvas(goose_tab, highlightthickness=0, background='#f5f8fb')
         goose_scroll = ttk.Scrollbar(goose_tab, orient='vertical', command=goose_canvas.yview)
         goose_scroll.pack(side='right', fill='y')
@@ -684,12 +693,27 @@ class SetupWindow:
         goose_canvas.bind('<Configure>', lambda event: goose_canvas.itemconfigure(
             goose_inner, width=event.width))
 
-        backend_box = ttk.LabelFrame(common_page, text='工件算法 · 确认后写入 YAML', padding=10)
+        backend_box = ttk.LabelFrame(system_page, text='工件选择 · 确认后写入当前 YAML', padding=10)
         backend_box.pack(fill='x', pady=(0, 8))
         ttk.Combobox(backend_box, textvariable=self.vars['pipeline.algorithm'],
                      values=BACKENDS, state='readonly', width=20).pack(side='left')
-        ttk.Label(backend_box, text='corrugated 波纹板 / gooseneck 鹅颈槽；下方 path.mode 仅用于波纹板',
+        ttk.Label(backend_box, text='corrugated 波纹板 / gooseneck 鹅颈槽；参数在各自独立主栏目中',
                   style='Muted.TLabel').pack(side='left', padx=10)
+        shared_box = ttk.LabelFrame(system_page, text='公共配置 · 不随工件切换', padding=12)
+        shared_box.pack(fill='x', pady=8)
+        ttk.Label(shared_box, text=(f'相机：{self.camera_path}\n手眼：{self.handeye_path}\n'
+                  f'算法参数保存至：{self.config_path}\n'
+                  '切换工件不改变相机曝光、TCP、手眼矩阵或ABB协议。ROI在“点云与ROI”页。'),
+                  wraplength=930).pack(anchor='w')
+        receiver_path = workspace / 'src/cimc/config/data_receiver.yaml'
+        receiver = (yaml.safe_load(receiver_path.read_text())['data_receiver_node']['ros__parameters']
+                    if receiver_path.is_file() else {})
+        ttk.Label(system_page, text=(
+            f'ABB本机监听：{receiver.get("listen_host", "未配置")}:{receiver.get("listen_port", "?")}；'
+            f'允许的机器人IP：{receiver.get("abb_allowed_ip", "未配置")}\n'
+            '网络参数在data_receiver.yaml维护，本窗口只读。Errno99表示本机没有监听IP；'
+            '未接硬件请用workflow_mode:=offline，不影响历史PLY预览。'),
+            wraplength=930, style='Muted.TLabel').pack(anchor='w', pady=12)
 
         goose_common = ttk.LabelFrame(goose_page, text='单次选择一个槽输出 8 点', padding=10)
         goose_common.pack(fill='x')
@@ -697,14 +721,18 @@ class SetupWindow:
                 ('gooseneck.vertical_length_mm', '两端竖缝长度上限 / mm'),
                 ('gooseneck.clearance_mm', '起止安全退距 / mm'),
                 ('gooseneck.groove_index', '槽号（按相机横向从小到大，起始1）'),
+                ('gooseneck.orientation_mode', '姿态：joint_bisector接头角平分 / shared旧姿态'),
                 ('gooseneck.body_tilt_deg', '整体抬枪修正 / °（-30~30，+远离底板）'),
-                ('gooseneck.side_lean_deg', '左右侧板外倾 / °（0~20，0为旧姿态）'),
+                ('gooseneck.side_lean_deg', '额外左右侧板外倾 / °（0~20，0为无额外修正）'),
                 ('gooseneck.tool_x_positive', '工具 X：false 反向 / true 复现移植包'),
                 ('gooseneck.tool_z_to_body', '工具 +Z：false 枪体→TCP / true TCP→枪体'))):
             ttk.Label(goose_common, text=label).grid(row=row, column=0, sticky='w', pady=3)
             if key.endswith(('tool_x_positive', 'tool_z_to_body')):
                 widget = ttk.Combobox(goose_common, textvariable=self.vars[key],
                                       values=('false', 'true'), state='readonly', width=15)
+            elif key.endswith('orientation_mode'):
+                widget = ttk.Combobox(goose_common, textvariable=self.vars[key],
+                                      values=('joint_bisector', 'shared'), state='readonly', width=20)
             else:
                 widget = ttk.Entry(goose_common, textvariable=self.vars[key], width=17)
             widget.grid(row=row, column=1, padx=12)
@@ -723,8 +751,8 @@ class SetupWindow:
                   wraplength=950).pack(anchor='w')
         ttk.Label(goose_page, text='白线是TCP→枪体；当+Z为枪体→TCP时，白线与+Z相反。'
                   '抬枪正值远离底板但会靠近前立面，负值相反；不能只看某一面判断防撞。'
-                  '侧板外倾按左右镜像让枪；X为原方向的最近正交投影，会小幅转动。'
-                  '0保持原姿态，先预览对比再保存；本软件未包含完整焊枪碰撞模型。',
+                  'joint_bisector会明显向左右让枪；X为原方向的最近正交投影，也会转动。'
+                  'shared且两修正角为0保持原姿态；本软件未包含完整焊枪碰撞模型。',
                   style='Safety.TLabel', wraplength=950).pack(anchor='w', pady=(8, 0))
 
         mode_box = ttk.LabelFrame(common_page, text='波纹板专用 · 路径算法', padding=12)
@@ -742,8 +770,8 @@ class SetupWindow:
                 row=row, column=1, padx=(12, 18), sticky='w')
             ttk.Label(common_box, text=key, style='Muted.TLabel').grid(
                 row=row, column=2, sticky='w')
-        ttk.Label(common_page, text='上方工件选择对两种算法生效；下方路径、工作角及安全偏移仅用于波纹板。'
-                  '鹅颈槽请到专用页调节，其工具轴方向开关也在专用页；手眼设置在“手眼标定”页。',
+        ttk.Label(common_page, text='本栏目仅用于波纹板。工件选择、相机和手眼在“工件与系统公共设置”；'
+                  '鹅颈槽在独立主栏目调节，其工具轴方向开关也在鹅颈槽栏目。',
                   style='Muted.TLabel', wraplength=950).pack(anchor='w', pady=(12, 0))
         groups_box = ttk.LabelFrame(point_page, text='波纹板专用 · 工件坐标系 XYZ 点位偏移 / mm', padding=10)
         groups_box.pack(fill='both', expand=True)
@@ -830,24 +858,41 @@ class SetupWindow:
         ttk.Button(footer, text='取消本次启动', command=self.cancel).pack(side='left')
         self.preview_button = ttk.Button(footer, text='用当前参数离线预览', command=self.preview)
         self.preview_button.pack(side='right', padx=(8, 0))
-        self.approve_button = ttk.Button(footer, text='确认配置并启动自动链路',
+        self.approve_button = ttk.Button(footer, text=('保存配置并结束离线验证' if self.offline_only else
+                                         '确认配置并启动自动链路'),
                                          style='Accent.TButton', command=self.approve)
         self.approve_button.pack(side='right', padx=(8, 0))
         self.status = tk.StringVar(value='当前配置尚未改动；需要调整时先选点云，再预览。')
         ttk.Label(outer, textvariable=self.status, style='Muted.TLabel',
                   wraplength=1000).pack(anchor='w', pady=(8, 0))
-        for variable in self.vars.values():
-            variable.trace_add('write', self.mark_changed)
+        for key, variable in self.vars.items():
+            variable.trace_add('write', self.backend_changed if key == 'pipeline.algorithm' else self.mark_changed)
         for variable in self.camera_vars.values():
             variable.trace_add('write', self.mark_changed)
         for variable in self.handeye_vars.values():
             variable.trace_add('write', self.mark_handeye_changed)
         self.update_matrix_info()
+        if self.vars['pipeline.algorithm'].get() == 'gooseneck' and not self.goose_profile_loaded:
+            self.backend_changed()
         self.update_review()
 
     def mark_changed(self, *_args):
         self.preview_signature = None
         self.update_review()
+
+    def backend_changed(self, *_args):
+        # First explicit selection in an old corrugated-only YAML: seed absent,
+        # untouched fields from the independent goose profile. Never write here.
+        if self.vars['pipeline.algorithm'].get() == 'gooseneck' and not self.goose_profile_loaded:
+            self.goose_profile_loaded = True
+            profile = self.workspace / 'src/weld_seam_perception/config/gooseneck.yaml'
+            if profile.is_file():
+                recommended = active_overrides(profile.read_text(encoding='utf-8'))
+                for key, default in GOOSENECK_DEFAULTS.items():
+                    if key not in self.original and self.vars[key].get() == default:
+                        self.vars[key].set(recommended.get(key, default))
+                self.status.set('首次切换鹅颈槽：已载入独立配置中的缺省参数至当前输入；预览后最终确认才保存。')
+        self.mark_changed()
 
     def mark_handeye_changed(self, *_args):
         self.matrix_verified.set(False)
@@ -978,7 +1023,7 @@ class SetupWindow:
                     raise ValueError(f'{key} 必须是有限数，绝对值不超过 100 mm')
                 value = format(number, '.9g')
             elif key.startswith('gooseneck.') and key not in (
-                    'gooseneck.tool_x_positive', 'gooseneck.tool_z_to_body'):
+                    'gooseneck.tool_x_positive', 'gooseneck.tool_z_to_body', 'gooseneck.orientation_mode'):
                 value = format(float(value), '.15g')
             elif key == 'path.rounded_corner_point_count':
                 count = int(value)
@@ -1012,7 +1057,7 @@ class SetupWindow:
             previous = self.original.get(key, PARAMETER_DEFAULTS.get(key, value))
             if (key.startswith('offset.') or
                     (key.startswith('gooseneck.') and key not in (
-                        'gooseneck.tool_x_positive', 'gooseneck.tool_z_to_body')) or
+                        'gooseneck.tool_x_positive', 'gooseneck.tool_z_to_body', 'gooseneck.orientation_mode')) or
                     (key.startswith('roi.') and key != 'roi.enable') or
                     key in {item[0] for item in WELD_COMMON}):
                 # YAML often spells the same number as 1.000 or 188.380. Do not
@@ -1271,7 +1316,8 @@ class SetupWindow:
             warning_text = ('算法提示：' + '\n'.join(self.preview_warnings) + '\n\n'
                             if preview_current and self.preview_warnings else '')
             if not messagebox.askyesno('最终确认',
-                    f'确认启动自动链路？\n\n'
+                    ('确认保存配置并结束离线验证？\n\n' if getattr(self, 'offline_only', False) else
+                     '确认启动自动链路？\n\n') +
                     f'相机配置 {self.camera_path}：{len(camera_changes)} 项\n'
                     f'焊缝配置 {self.config_path}：{len(changes)} 项\n'
                     f'手眼配置 {self.handeye_path}：{len(handeye_changes)} 项\n'
@@ -1280,8 +1326,9 @@ class SetupWindow:
                     f'平移单位：{self.handeye_vars["matrix_translation_unit"].get()}\n'
                     f'{"当前预览点数 " + str(preview_points) if preview_points else "未使用离线预览，须现场核对"}。\n\n'
                     + warning_text +
-                    '确认后启动相机、焊缝、手眼、协调节点；'
-                    '之后多条 ABB 请求自动处理，不再逐次询问。',
+                    ('确认后只保存配置并退出；不启动相机、ABB或自动链路。'
+                     if getattr(self, 'offline_only', False) else
+                     '确认后启动相机、焊缝、手眼、协调节点；之后多条ABB请求自动处理，不再逐次询问。'),
                     parent=self.root):
                 return
             plans = []
@@ -1346,9 +1393,10 @@ class SetupWindow:
 
 
 def main():
-    if len(sys.argv) not in (4, 5):
-        raise SystemExit('用法: weld_operator_setup <workspace> <weld_yaml> <camera_yaml> [handeye_yaml]')
-    window = SetupWindow(*(Path(arg).resolve() for arg in sys.argv[1:]))
+    arguments = [arg for arg in sys.argv[1:] if arg != '--offline']
+    if len(arguments) not in (3, 4):
+        raise SystemExit('用法: weld_operator_setup [--offline] <workspace> <weld_yaml> <camera_yaml> [handeye_yaml]')
+    window = SetupWindow(*(Path(arg).resolve() for arg in arguments), offline_only='--offline' in sys.argv)
     window.root.mainloop()
     return 0 if window.approved else 2
 

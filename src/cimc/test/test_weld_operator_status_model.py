@@ -10,6 +10,13 @@ from cimc.weld_operator_status_model import StatusModel  # noqa: E402
 
 
 class StatusModelTest(unittest.TestCase):
+    def test_listener_wait_is_not_reported_as_connected(self):
+        model = StatusModel()
+        model.accept('/abb/connection_status',
+                     '{"state":"waiting_address","message":"本机没有192.168.3.100"}')
+        self.assertIn('等待本机', model.connection)
+        self.assertIn('192.168.3.100', model.connection)
+        self.assertNotIn('已连接', model.connection)
     def test_separate_prepared_send_success_and_ack(self):
         model = StatusModel()
         model.accept('/abb/connection_status', '{"state":"connected","peer":"192.168.3.2:5"}', '10:00:00')

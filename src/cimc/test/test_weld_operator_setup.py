@@ -262,6 +262,24 @@ class OperatorConfigTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 form.changes()
 
+    def test_first_goose_selection_seeds_profile_without_overwriting_edits(self):
+        from cimc.weld_algorithm import GOOSENECK_DEFAULTS
+        form = self.make_form()
+        form.workspace = Path(__file__).resolve().parents[3]
+        form.goose_profile_loaded = False
+        form.vars.update({key: Value(value) for key, value in GOOSENECK_DEFAULTS.items()})
+        form.vars['pipeline.algorithm'] = Value('gooseneck')
+        form.vars['gooseneck.corner_2.pitch'].set('6')
+        form.status = Mock()
+        form.mark_changed = Mock()
+        form.backend_changed()
+        self.assertEqual(form.vars['gooseneck.orientation_mode'].get(), 'joint_bisector')
+        self.assertEqual(form.vars['gooseneck.corner_2.pitch'].get(), '6')
+        self.assertEqual(form.changes()['gooseneck.orientation_mode'], 'joint_bisector')
+        form.vars['gooseneck.orientation_mode'].set('shared')
+        form.backend_changed()
+        self.assertEqual(form.vars['gooseneck.orientation_mode'].get(), 'shared')
+
     def test_reject_exposure_longer_than_frame_and_even_corner_count(self):
         form = self.make_form()
         form.camera_vars['depth_exposure'].value = '25000'
