@@ -902,6 +902,14 @@ ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=manual
 # 尚未进行真实硬件验证；首次发送前需核对TCP轴、槽号与姿态。
 
 # 16.1 完全离线：读取ROS YAML生成PLY/CSV；不启动相机或ABB
+# 原始点云目录：/home/mini/scut_weld_data/pointclouds/
+# 已回归样本：live_20261104_160336_814.ply、live_20261104_160300_749.ply（单槽）；
+# live_20261104_160017_391.ply、live_20261104_155850_206.ply（双槽）。
+# SDK源码：/home/mini/x86_ros2_ws/gooseneck_weld/
+# 当前方向的现成结果：/home/mini/x86_ros2_ws/operator_sessions/gooseneck_same_tcp_validation/
+# current_tcp_result.ply=单槽160336；single_alt_result.ply=单槽160300；
+# double_slot1_result.ply / double_slot2_result.ply=双槽160017的第1 / 第2槽。
+# reversed_x_result.ply是反向X对照，不是正式默认结果。
 cd /home/mini/x86_ros2_ws
 python3 scripts/offline_weld.py \
   /home/mini/scut_weld_data/pointclouds/live_20261104_160336_814.ply \
@@ -927,6 +935,9 @@ python3 /home/mini/x86_ros2_ws/src/cimc/cimc/weld_operator_setup.py \
   /home/mini/x86_ros2_ws/src/chishine_camera_ros2/config/camera.yaml \
   /home/mini/x86_ros2_ws/src/cimc/config/handeye_bridge.yaml
 # 选择历史PLY -> 在算法页选择gooseneck -> 鹅颈槽页调参数 -> 当前参数预览。
+# “波纹板分类点位偏移”页仅作用于波纹板，沿工件XYZ；鹅颈槽请用其专用
+# 补偿页，沿相机XYZ平移、工具局部XYZ旋转。上方提示实时显示当前工件
+# 与最终确认写入的YAML路径；选算法不会自动切换配置文件路径。
 # 预览不写正式配置；最终确认才写入传入的gooseneck.yaml，并做回读校验。
 # 这条独立Python命令确认后只退出，不会自动启动生产链路。
 

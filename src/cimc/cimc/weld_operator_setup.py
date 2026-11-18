@@ -44,6 +44,14 @@ GROUP_DEFAULTS = {
     'straight_right_waist': (0, 0, 0),
     'adaptive_contour': (0, 0, 0),
 }
+GROUP_LABELS = {
+    'start_transition': '起始安全点', 'end_transition': '末尾安全点',
+    'protruding_left': '凸角左', 'protruding_right': '凸角右',
+    'recessed_left': '凹角左', 'recessed_right': '凹角右',
+    'straight_protruding_flat': '凸平边中点', 'straight_left_waist': '左斜边中点',
+    'straight_recessed_flat': '凹平边中点', 'straight_right_waist': '右斜边中点',
+    'adaptive_contour': '自适应轮廓点',
+}
 ROI_KEYS = ('roi.enable', 'roi.min_x', 'roi.max_x', 'roi.min_y',
             'roi.max_y', 'roi.min_z', 'roi.max_z')
 MODES = ('feature_points', 'rounded_features', 'adaptive_contour')
@@ -77,6 +85,14 @@ PARAMETER_DEFAULTS = {
     **{key: default for key, _label, default in WELD_COMMON},
     **GOOSENECK_DEFAULTS,
 }
+
+
+def algorithm_scope_text(backend, config_path):
+    name = {'corrugated': '波纹板（corrugated）',
+            'gooseneck': '鹅颈槽（gooseneck）'}.get(backend, f'未知算法（{backend}）')
+    return (f'当前工件算法：{name}；最终确认写入：{config_path}\n'
+            'ROI 共用；波纹板使用 path.* / orientation.* / offset.*，'
+            '鹅颈槽使用 gooseneck.*。另一工件的专用参数不参与本次提取。')
 
 
 def preview_failure_explanation(output):
@@ -642,12 +658,15 @@ class SetupWindow:
             '重拍次数和有效比例仅影响 ROS 拍照节点，不影响实时预览。'),
             style='Muted.TLabel', wraplength=900).pack(anchor='w', pady=(12, 0))
 
+        self.algorithm_scope = tk.StringVar()
+        ttk.Label(offset_tab, textvariable=self.algorithm_scope, wraplength=950,
+                  style='Muted.TLabel').pack(anchor='w', fill='x', pady=(0, 9))
         offset_pages = ttk.Notebook(offset_tab)
         offset_pages.pack(fill='both', expand=True)
         common_page = ttk.Frame(offset_pages, padding=10)
         point_page = ttk.Frame(offset_pages, padding=10)
-        offset_pages.add(common_page, text='  算法与常用参数  ')
-        offset_pages.add(point_page, text='  分类点位偏移  ')
+        offset_pages.add(common_page, text='  工件选择 / 波纹板参数  ')
+        offset_pages.add(point_page, text='  波纹板分类点位偏移  ')
         goose_tab = ttk.Frame(offset_pages)
         offset_pages.add(goose_tab, text='  鹅颈槽参数与逐点补偿  ')
         goose_canvas = tk.Canvas(goose_tab, highlightthickness=0, background='#f5f8fb')
@@ -698,14 +717,14 @@ class SetupWindow:
                   '工具 X 翻转会改变绕 Z 的角度180°，真机前须核对TCP轴。',
                   wraplength=950).pack(anchor='w')
 
-        mode_box = ttk.LabelFrame(common_page, text='路径算法', padding=12)
+        mode_box = ttk.LabelFrame(common_page, text='波纹板专用 · 路径算法', padding=12)
         mode_box.pack(fill='x', pady=(0, 10))
         ttk.Label(mode_box, text='path.mode').pack(side='left')
         ttk.Combobox(mode_box, textvariable=self.vars['path.mode'], values=MODES,
                      width=24, state='readonly').pack(side='left', padx=12)
         ttk.Label(mode_box, text='feature_points 单角点 / rounded_features 圆角离散 / adaptive_contour 自适应轮廓',
                   style='Muted.TLabel').pack(side='left')
-        common_box = ttk.LabelFrame(common_page, text='现场常用算法参数 · 写入 weld_seam.yaml', padding=12)
+        common_box = ttk.LabelFrame(common_page, text='波纹板专用 · 常用姿态与圆角参数', padding=12)
         common_box.pack(fill='x')
         for row, (key, label, _default) in enumerate(WELD_COMMON):
             ttk.Label(common_box, text=label).grid(row=row, column=0, sticky='w', pady=4)
@@ -713,19 +732,23 @@ class SetupWindow:
                 row=row, column=1, padx=(12, 18), sticky='w')
             ttk.Label(common_box, text=key, style='Muted.TLabel').grid(
                 row=row, column=2, sticky='w')
-        ttk.Label(common_page, text='工具轴方向、手眼矩阵等高风险参数仍在各自 YAML 中，不在本窗口快捷修改。',
-                  style='Safety.TLabel').pack(anchor='w', pady=(12, 0))
-        groups_box = ttk.LabelFrame(point_page, text='工件坐标系下的点位偏移 / mm', padding=10)
+        ttk.Label(common_page, text='上方工件选择对两种算法生效；下方路径、工作角及安全偏移仅用于波纹板。'
+                  '鹅颈槽请到专用页调节，其工具轴方向开关也在专用页；手眼设置在“手眼标定”页。',
+                  style='Muted.TLabel', wraplength=950).pack(anchor='w', pady=(12, 0))
+        groups_box = ttk.LabelFrame(point_page, text='波纹板专用 · 工件坐标系 XYZ 点位偏移 / mm', padding=10)
         groups_box.pack(fill='both', expand=True)
         for column, title in enumerate(('参数组（预览表格会标出）', 'X', 'Y', 'Z')):
             ttk.Label(groups_box, text=title).grid(row=0, column=column, padx=(0, 12), sticky='w')
         for row, (group, defaults) in enumerate(GROUP_DEFAULTS.items(), 1):
-            ttk.Label(groups_box, text=group).grid(row=row, column=0, padx=(0, 12), pady=3, sticky='w')
+            ttk.Label(groups_box, text=f'{GROUP_LABELS[group]} · {group}').grid(
+                row=row, column=0, padx=(0, 12), pady=3, sticky='w')
             for column, axis in enumerate('xyz', 1):
                 ttk.Entry(groups_box, textvariable=self.vars[f'offset.{group}.{axis}'],
                           width=15).grid(row=row, column=column, padx=(0, 12), pady=3, sticky='w')
-        ttk.Label(point_page, text='离线算法预览使用当前焊缝参数；相机参数用于实时点云预览。两种预览都不写正式 YAML。',
-                  style='Muted.TLabel').pack(anchor='w', pady=(10, 0))
+        ttk.Label(point_page, text='对应 offset.<参数组>.x / y / z，沿波纹板工件轴，不是相机轴。'
+                  '鹅颈槽不使用本页补偿，请到“鹅颈槽参数与逐点补偿”页设置。'
+                  '离线预览使用当前输入，只有最终确认才写正式 YAML。',
+                  style='Muted.TLabel', wraplength=950).pack(anchor='w', pady=(10, 0))
 
         matrix_box = ttk.LabelFrame(handeye_tab, text='标定文件与变换约定 · handeye_bridge.yaml', padding=12)
         matrix_box.pack(fill='x')
@@ -877,6 +900,9 @@ class SetupWindow:
             self.matrix_info.set(f'标定矩阵不可用：{exc}')
 
     def update_review(self):
+        if hasattr(self, 'algorithm_scope'):
+            self.algorithm_scope.set(algorithm_scope_text(
+                self.vars['pipeline.algorithm'].get(), self.config_path))
         try:
             changes = self.changes()
             camera_changes = self.camera_changes()

@@ -13,7 +13,8 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cimc.weld_operator_setup import (  # noqa: E402
-    CAMERA_FIELDS, GROUP_DEFAULTS, ROI_KEYS, WELD_COMMON, SetupWindow,
+    CAMERA_FIELDS, GROUP_DEFAULTS, GROUP_LABELS, ROI_KEYS, WELD_COMMON, SetupWindow,
+    algorithm_scope_text,
     active_overrides, camera_save_directory, replace_active_overrides,
     replace_camera_parameters, replace_handeye_parameters,
     inspect_handeye_matrix, viewer_command, camera_direct_environment,
@@ -65,6 +66,16 @@ class OperatorConfigTest(unittest.TestCase):
         form = self.make_form()
         self.assertEqual(form.changes(), {})
         self.assertEqual(form.camera_changes(), {})
+
+    def test_algorithm_labels_identify_scope_and_actual_config(self):
+        self.assertEqual(set(GROUP_LABELS), set(GROUP_DEFAULTS))
+        for backend, name in (('corrugated', '波纹板'), ('gooseneck', '鹅颈槽')):
+            config = Path('/tmp/operator_test') / f'{backend}.yaml'
+            text = algorithm_scope_text(backend, config)
+            self.assertIn(f'当前工件算法：{name}', text)
+            self.assertIn(str(config), text)
+            self.assertIn('另一工件的专用参数不参与', text)
+            self.assertIn('ROI 共用', text)
 
     def test_camera_edit_reaches_viewer_and_yaml(self):
         form = self.make_form()
