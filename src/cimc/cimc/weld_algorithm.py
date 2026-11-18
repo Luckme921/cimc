@@ -14,6 +14,8 @@ GOOSENECK_DEFAULTS = {
     'gooseneck.vertical_length_mm': '40', 'gooseneck.clearance_mm': '30',
     'gooseneck.groove_index': '1', 'gooseneck.tool_x_positive': 'true',
     'gooseneck.tool_z_to_body': 'false',
+    'gooseneck.body_tilt_deg': '0',
+    'gooseneck.side_lean_deg': '0',
     **{f'gooseneck.{role}.{field}': '0'
        for role, _ in GOOSENECK_ROLES for field in GOOSENECK_FIELDS},
 }
@@ -35,6 +37,10 @@ def validate_gooseneck(values):
             valid = 0 < number <= 1000
         elif key.endswith('groove_index'):
             valid = number.is_integer() and 1 <= number <= 100
+        elif key.endswith('body_tilt_deg'):
+            valid = -30 <= number <= 30
+        elif key.endswith('side_lean_deg'):
+            valid = 0 <= number <= 20
         else:
             valid = abs(number) <= (100 if key.endswith(('.dx', '.dy', '.dz')) else 180)
         if not valid:

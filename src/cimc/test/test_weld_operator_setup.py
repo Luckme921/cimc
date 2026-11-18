@@ -239,6 +239,29 @@ class OperatorConfigTest(unittest.TestCase):
         self.assertIn('path.mode', values)
         self.assertNotIn('gooseneck.corner_2.pitch', values)
 
+    def test_gooseneck_body_tilt_is_saved_and_bounded(self):
+        from cimc.weld_algorithm import GOOSENECK_DEFAULTS, select_backend
+        form = self.make_form()
+        form.vars.update({key: Value(value) for key, value in GOOSENECK_DEFAULTS.items()})
+        form.vars['pipeline.algorithm'] = Value('gooseneck')
+        form.vars['gooseneck.body_tilt_deg'].set('15')
+        text = replace_active_overrides(self.weld_text, form.changes())
+        self.assertEqual(active_overrides(text)['gooseneck.body_tilt_deg'], '15')
+        name, params = select_backend(active_overrides(text))
+        self.assertEqual(name, 'gooseneck')
+        self.assertEqual(params['gooseneck.body_tilt_deg'], '15')
+        for invalid in ('31', '-31', 'nan', 'inf'):
+            form.vars['gooseneck.body_tilt_deg'].set(invalid)
+            with self.assertRaises(ValueError):
+                form.changes()
+        form.vars['gooseneck.body_tilt_deg'].set('0')
+        form.vars['gooseneck.side_lean_deg'].set('10')
+        self.assertEqual(form.changes()['gooseneck.side_lean_deg'], '10')
+        for invalid in ('-1', '21', 'nan'):
+            form.vars['gooseneck.side_lean_deg'].set(invalid)
+            with self.assertRaises(ValueError):
+                form.changes()
+
     def test_reject_exposure_longer_than_frame_and_even_corner_count(self):
         form = self.make_form()
         form.camera_vars['depth_exposure'].value = '25000'

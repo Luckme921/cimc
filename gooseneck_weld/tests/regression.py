@@ -44,13 +44,61 @@ def axes(row):
     return matrix
 
 
+def check_tilt_and_lean(cloud, out, original, slot=1):
+    """Correct physical directions without moving TCP targets or flipping tool X."""
+    reference_x = axes(original[0])[:, 0]
+    for tilt in (-15, 15):
+        tilted = run(cloud, out, f'tilt_{slot}_{tilt}',
+                     f'gooseneck.groove_index={slot}', f'gooseneck.body_tilt_deg={tilt}')
+        for before, after in zip(original, tilted):
+            np.testing.assert_allclose([float(after[k]) for k in 'xyz'],
+                                       [float(before[k]) for k in 'xyz'], atol=1e-9)
+            np.testing.assert_allclose(axes(after)[:, 0], axes(before)[:, 0], atol=1e-9)
+            turn = math.degrees(2*math.acos(min(1., abs(quaternion(before) @ quaternion(after)))))
+            assert abs(turn-abs(tilt)) < 1e-5
+            assert tilt*(float(after['body_angle_to_base_deg'])-
+                         float(before['body_angle_to_base_deg'])) > 0
+    leaned = run(cloud, out, f'lean_{slot}', f'gooseneck.groove_index={slot}',
+                 'gooseneck.side_lean_deg=10')
+    reversed_x = run(cloud, out, f'lean_flip_x_{slot}', f'gooseneck.groove_index={slot}',
+                     'gooseneck.side_lean_deg=10', 'gooseneck.tool_x_positive=false')
+    reversed_z = run(cloud, out, f'lean_flip_z_{slot}', f'gooseneck.groove_index={slot}',
+                     'gooseneck.side_lean_deg=10', 'gooseneck.tool_z_to_body=true')
+    combined = run(cloud, out, f'lean_tilt_{slot}', f'gooseneck.groove_index={slot}',
+                   'gooseneck.side_lean_deg=10', 'gooseneck.body_tilt_deg=-10')
+    for i, (before, after, flip_x, flip_z, both) in enumerate(
+            zip(original, leaned, reversed_x, reversed_z, combined)):
+        for candidate in (after, flip_x, flip_z, both):
+            np.testing.assert_allclose([float(candidate[k]) for k in 'xyz'],
+                                       [float(before[k]) for k in 'xyz'], atol=1e-9)
+            axes(candidate)
+        np.testing.assert_allclose(axes(after)[:, 0] @ reference_x, math.cos(math.radians(10)), atol=1e-9)
+        body = np.array([float(after[f'world_torch_body_axis_{k}']) for k in 'xyz'])
+        assert abs(body @ reference_x - (-1 if i<=3 else 1)*math.sin(math.radians(10))) < 1e-9
+        for flipped in (flip_x, flip_z):
+            np.testing.assert_allclose(body, [float(flipped[f'world_torch_body_axis_{k}']) for k in 'xyz'], atol=1e-9)
+        assert after['pose_source'] == 'outward_side_lean_frame'
+    np.testing.assert_allclose(quaternion(leaned[0]), quaternion(leaned[1]), atol=1e-9)
+    np.testing.assert_allclose(quaternion(leaned[6]), quaternion(leaned[7]), atol=1e-9)
+    max_turn = max(math.degrees(2*math.acos(min(1., abs(quaternion(a)@quaternion(b)))))
+                   for a,b in zip(leaned, leaned[1:]))
+    assert abs(max_turn-20) < 1e-5
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='gooseneck_regression_') as folder:
         out = Path(folder)
         ply = DATA / 'live_20261104_160336_814.ply'
         original = run(ply, out, 'original', 'gooseneck.tool_x_positive=true')
         current = run(ply, out, 'current_default')
-        assert current == original, 'production default must preserve portable +X'
+        assert current == original, 'SDK zero-adjustment default must preserve portable +X'
+        check_tilt_and_lean(ply, out, original)
+        for key, value in (('body_tilt_deg', '31'), ('body_tilt_deg', 'nan'),
+                           ('side_lean_deg', '-1'), ('side_lean_deg', '21')):
+            rejected = subprocess.run([str(SDK), str(ply), str(out), 'rejected_angle',
+                                       '--set', f'gooseneck.{key}={value}'], capture_output=True)
+            assert rejected.returncode != 0
+            assert not (out/'rejected_angle_features.csv').exists()
         flipped = run(ply, out, 'flipped', 'gooseneck.tool_x_positive=false')
         assert len(original) == len(flipped) == 8
         assert [row['weld_enabled'] for row in flipped] == ['0', '1', '1', '1', '1', '1', '1', '0']
@@ -123,6 +171,7 @@ def main():
                 for a, b in zip(expected, actual):
                     assert all(abs(float(a[k])-float(b[k])) < 1e-7 for k in 'xyz')
                     assert abs(quaternion(a) @ quaternion(b)) > 1 - 1e-8
+                check_tilt_and_lean(cloud, out, actual, slot)
             print(f'PASS: {stem}, {count} groove(s), every slot matches portable SDK')
         for stem in ('live_20261104_161852_937', 'live_20261104_170234_609'):
             cloud = DATA / f'{stem}.ply'
@@ -134,8 +183,9 @@ def main():
             assert b'Expected two parallel upright faces and a base face' in old.stderr
             assert b'Expected two parallel upright faces and a base face' in new.stderr
             print(f'PASS: {stem}, both portable and SDK reject unsupported plane geometry')
-        print('PASS: 8 poses; portable geometry/pose parity; proper X/Y flip with Z fixed; '
-              'position/rotation offsets; endpoint length; clearance; deterministic results; invalid slot rejected')
+        print('PASS: 8 poses; portable zero-adjustment parity; signed body tilt; mirrored side lean; '
+              'fixed XYZ and nearest orthogonal tool X; physical lean independent of X/Z signs; '
+              'right-handed quaternions; bounded angles; offsets; endpoint length; clearance; deterministic results')
 
 
 if __name__ == '__main__':

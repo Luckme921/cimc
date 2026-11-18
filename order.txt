@@ -924,6 +924,11 @@ python3 scripts/offline_weld.py \
   --set gooseneck.tool_x_positive=false
 # 其他临时参数示例：--set gooseneck.corner_2.dx=1.5
 # --set gooseneck.corner_2.pitch=5 --set gooseneck.vertical_length_mm=30
+# 侧板外倾：gooseneck.side_lean_deg=10（0~20°），左侧向左、右侧向右。
+# 当前鹅颈槽YAML选10°为待现场验收候选；工具X取最近正交投影，会小幅偏转。
+# 整体抬枪：gooseneck.body_tilt_deg=0（-30~30°）；+远离底板，-远离前立面。
+# 两项设0可复现旧共享姿态；这两项只改姿态，不移动TCP点，不能替代防撞检查。
+# 白线为TCP→枪体；当tool_z_to_body=false时，与工具+Z相反。
 # 双槽样本选第二槽：文件用live_20261104_160017_391.ply，并加
 # --set gooseneck.groove_index=2；一次仍只输出8点。
 

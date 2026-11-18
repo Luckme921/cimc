@@ -443,7 +443,10 @@ class PreviewWindow:
                 f"P{int(row['order']) + 1} · 槽 {row['groove']} → {row['feature_type']}；"
                 f'YAML：gooseneck.{group}.dx / dy / dz（相机轴 mm）；'
                 f'roll / pitch / yaw（工具局部轴 °）；'
-                f"当前旋转：{row['roll']}/{row['pitch']}/{row['yaw']}°。")
+                f"当前逐点旋转：{row['roll']}/{row['pitch']}/{row['yaw']}°；"
+                f"整体抬枪修正：{row.get('body_tilt_deg', '0')}°；"
+                f"侧板外倾：{row.get('side_lean_deg', '0')}°；"
+                f"枪体轴与底板夹角：{row.get('body_angle_to_base_deg', '旧结果未记录')}°。")
             return
         self.detail.set(
             f"P{int(row['order']) + 1} → {row['feature_type']}；"
@@ -694,6 +697,8 @@ class SetupWindow:
                 ('gooseneck.vertical_length_mm', '两端竖缝长度上限 / mm'),
                 ('gooseneck.clearance_mm', '起止安全退距 / mm'),
                 ('gooseneck.groove_index', '槽号（按相机横向从小到大，起始1）'),
+                ('gooseneck.body_tilt_deg', '整体抬枪修正 / °（-30~30，+远离底板）'),
+                ('gooseneck.side_lean_deg', '左右侧板外倾 / °（0~20，0为旧姿态）'),
                 ('gooseneck.tool_x_positive', '工具 X：false 反向 / true 复现移植包'),
                 ('gooseneck.tool_z_to_body', '工具 +Z：false 枪体→TCP / true TCP→枪体'))):
             ttk.Label(goose_common, text=label).grid(row=row, column=0, sticky='w', pady=3)
@@ -716,6 +721,11 @@ class SetupWindow:
                   '安全点位置先继承邻接焊点补偿再叠加自身补偿。'
                   '工具 X 翻转会改变绕 Z 的角度180°，真机前须核对TCP轴。',
                   wraplength=950).pack(anchor='w')
+        ttk.Label(goose_page, text='白线是TCP→枪体；当+Z为枪体→TCP时，白线与+Z相反。'
+                  '抬枪正值远离底板但会靠近前立面，负值相反；不能只看某一面判断防撞。'
+                  '侧板外倾按左右镜像让枪；X为原方向的最近正交投影，会小幅转动。'
+                  '0保持原姿态，先预览对比再保存；本软件未包含完整焊枪碰撞模型。',
+                  style='Safety.TLabel', wraplength=950).pack(anchor='w', pady=(8, 0))
 
         mode_box = ttk.LabelFrame(common_page, text='波纹板专用 · 路径算法', padding=12)
         mode_box.pack(fill='x', pady=(0, 10))

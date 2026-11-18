@@ -41,7 +41,8 @@ bool boolean(const Settings& s,const std::string& k){
 Settings load(const gooseneck_sdk::RunOptions& o){
  Settings s{{"gooseneck.vertical_length_mm","40"},{"gooseneck.clearance_mm","30"},
  {"gooseneck.tool_x_positive","true"},{"gooseneck.tool_z_to_body","false"},
- {"gooseneck.groove_index","1"},{"roi.enable","false"}};
+ {"gooseneck.groove_index","1"},{"gooseneck.body_tilt_deg","0"},
+ {"gooseneck.side_lean_deg","0"},{"roi.enable","false"}};
  for(char a:std::string("xyz")){s[std::string("roi.min_")+a]="-inf";s[std::string("roi.max_")+a]="inf";}
  for(const auto& r:roles)for(const auto& f:fields)s["gooseneck."+r+"."+f]="0";
  if(!o.config_file.empty()){
@@ -89,21 +90,24 @@ void writeRows(const fs::path& target,const gooseneck::Trajectory& p,const Extra
  "applied_offset_camera_x,applied_offset_camera_y,applied_offset_camera_z,roll,pitch,yaw,"
  "feature_type,point_source,groove,groove_order,world_tool_x_axis_x,world_tool_x_axis_y,world_tool_x_axis_z,"
  "world_torch_body_axis_x,world_torch_body_axis_y,world_torch_body_axis_z,tool_positive_z_direction,"
- "tool_x_reference,tool_x_workpiece_direction\n"<<std::setprecision(12);
+ "tool_x_reference,tool_x_workpiece_direction,body_tilt_deg,body_angle_to_base_deg,side_lean_deg\n"<<std::setprecision(12);
  const V x=gooseneck::unit(g.along),z=gooseneck::unit(g.up-x*g.up.dot(x)),y=z.cross(x);
  for(int i=0;i<8;++i){const auto v=p.position[i],raw=p.nominal[i],offset=v-raw,a=o.offsets[i].angles;
   const V local=v-g.origin,rawLocal=raw-g.origin;
   csv<<i<<','<<v.x<<','<<v.y<<','<<v.z;
   for(double q:p.orientation[i])csv<<','<<q;
   csv<<','<<raw.x<<','<<raw.y<<','<<raw.z<<','<<local.dot(x)<<','<<local.dot(y)<<','<<local.dot(z)
-   <<','<<rawLocal.dot(x)<<','<<rawLocal.dot(y)<<','<<rawLocal.dot(z)<<','<<roles[i]<<",shared_transverse_frame,"
+   <<','<<rawLocal.dot(x)<<','<<rawLocal.dot(y)<<','<<rawLocal.dot(z)<<','<<roles[i]<<','
+   <<(o.sideLeanDegrees!=0?"outward_side_lean_frame":o.bodyTiltDegrees!=0?"tilted_transverse_frame":"shared_transverse_frame")<<','
    <<(i>=1&&i<=6)<<','<<roles[i]<<','<<offset.dot(x)<<','<<offset.dot(y)<<','<<offset.dot(z)
    <<','<<offset.x<<','<<offset.y<<','<<offset.z<<','<<a.x<<','<<a.y<<','<<a.z
    <<','<<roles[i]<<','<<(i==0||i==7?"generated_safe_transition":"measured_red_seam_point")
    <<','<<groove<<','<<i<<','<<p.toolX[i].x<<','<<p.toolX[i].y<<','<<p.toolX[i].z
    <<','<<p.body[i].x<<','<<p.body[i].y<<','<<p.body[i].z
    <<','<<(o.positiveBodyZ?"tcp_to_body":"body_to_tcp")
-   <<",gooseneck_transverse,"<<(o.positiveToolX?"positive_x":"negative_x")<<'\n';}
+   <<",gooseneck_transverse,"<<(o.positiveToolX?"positive_x":"negative_x")
+   <<','<<o.bodyTiltDegrees<<','<<std::asin(std::clamp(p.body[i].dot(gooseneck::unit(g.up)),-1.0,1.0))*180/std::acos(-1.0)
+   <<','<<o.sideLeanDegrees<<'\n';}
  csv.close();if(!csv)throw std::runtime_error("Cannot write normalized CSV");
 }
 void writeCloud(const fs::path& target,const pcl::PointCloud<pcl::PointXYZRGB>& points){
@@ -116,7 +120,7 @@ void writeCloud(const fs::path& target,const pcl::PointCloud<pcl::PointXYZRGB>& 
 }
 }
 
-const char* gooseneck_sdk::version(){return "1.0.1";}
+const char* gooseneck_sdk::version(){return "1.0.2";}
 gooseneck_sdk::RunResult gooseneck_sdk::run(const RunOptions& options){
  RunResult result;const auto start=std::chrono::steady_clock::now();
  try{
@@ -127,6 +131,10 @@ gooseneck_sdk::RunResult gooseneck_sdk::run(const RunOptions& options){
    throw std::invalid_argument("Vertical length must be 1..10000 mm; groove_index must be an integer 1..100");
   gooseneck::Options o;o.clearance=number(s,"gooseneck.clearance_mm");
   if(o.clearance<=0||o.clearance>1000)throw std::invalid_argument("Clearance must be >0 and <=1000 mm");
+  o.bodyTiltDegrees=number(s,"gooseneck.body_tilt_deg");
+  if(std::abs(o.bodyTiltDegrees)>30)throw std::invalid_argument("Body tilt must be -30..30 degrees");
+  o.sideLeanDegrees=number(s,"gooseneck.side_lean_deg");
+  if(o.sideLeanDegrees<0||o.sideLeanDegrees>20)throw std::invalid_argument("Side lean must be 0..20 degrees");
   o.positiveToolX=boolean(s,"gooseneck.tool_x_positive");o.positiveBodyZ=boolean(s,"gooseneck.tool_z_to_body");
   for(size_t i=0;i<roles.size();++i){std::array<double,6> v{};
    for(size_t j=0;j<fields.size();++j){v[j]=number(s,"gooseneck."+roles[i]+"."+fields[j]);
@@ -160,7 +168,9 @@ gooseneck_sdk::RunResult gooseneck_sdk::run(const RunOptions& options){
   result.feature_time_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-featureStart).count();
   result.status=0;result.message="ok";
   std::cout<<"Gooseneck SDK "<<version()<<": selected groove "<<int(selected)<<'/'<<geometry.paths.size()
-   <<", 8 points, tool +X="<<(o.positiveToolX?"+transverse":"-transverse")<<'\n';
+   <<", 8 points, tool +X="<<(o.positiveToolX?"+transverse":"-transverse")
+   <<", body tilt="<<o.bodyTiltDegrees<<" deg, outward side lean="<<o.sideLeanDegrees
+   <<" deg (no collision guarantee)"<<'\n';
  }catch(const std::exception& e){result.message=e.what();}
  result.total_time_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
  result.primary_time_ms=result.total_time_ms-result.feature_time_ms;return result;

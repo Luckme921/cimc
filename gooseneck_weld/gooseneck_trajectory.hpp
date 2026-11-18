@@ -32,6 +32,12 @@ struct Offset {
 
 struct Options {
  double clearance = 30;
+ // Signed correction from the original bisector: positive tilts physical body
+ // toward the base normal, independent of the chosen tool X/Z signs.
+ double bodyTiltDegrees = 0;
+ // Positive leans away from the left/right upright, respectively. Tool X is
+ // the closest orthogonal projection of the original reference, never flipped.
+ double sideLeanDegrees = 0;
  bool positiveBodyZ = false;
  bool positiveToolX = true;
  std::array<Offset,8> offsets{};
@@ -134,7 +140,14 @@ inline Trajectory makeTrajectory(const Samples& samples,
  // Take the bisector in the cross section perpendicular to the transverse seam.
  const V baseNormal=unit(base-seamX*base.dot(seamX));
  const V frontNormal=unit(front-seamX*front.dot(seamX));
- const V sharedZ=unit(baseNormal+frontNormal)*bodySign;
+ V sharedBody=unit(baseNormal+frontNormal);
+ if(!std::isfinite(options.bodyTiltDegrees)||std::abs(options.bodyTiltDegrees)>30)
+  throw std::invalid_argument("Body tilt must be finite and within -30..30 degrees");
+ if(!std::isfinite(options.sideLeanDegrees)||options.sideLeanDegrees<0||options.sideLeanDegrees>20)
+  throw std::invalid_argument("Side lean must be finite and within 0..20 degrees");
+ if(options.bodyTiltDegrees!=0)
+  sharedBody=unit(rotate(sharedBody,unit(sharedBody.cross(baseNormal)),options.bodyTiltDegrees));
+ const V sharedZ=sharedBody*bodySign;
  const std::array<V,3> sharedFrame{seamX,unit(sharedZ.cross(seamX)),sharedZ};
  auto applyAngles=[](std::array<V,3> frame,V angles){
   auto& [x,y,z]=frame;
@@ -156,7 +169,15 @@ inline Trajectory makeTrajectory(const Samples& samples,
  const V entryRetreat=retreatDirection(wall-along,p[2]-p[1],options.offsets[1].angles);
  const V exitRetreat=retreatDirection(wall+along,p[6]-p[5],options.offsets[6].angles);
  for(int i=0;i<8;++i){
-  const auto [x,y,z]=applyAngles(sharedFrame,options.offsets[i].angles);
+  auto frame=sharedFrame;
+  if(options.sideLeanDegrees!=0){
+   const double a=options.sideLeanDegrees*std::acos(-1.0)/180;
+   const V body=unit(sharedBody*std::cos(a)+transverse*((i<=3?-1:1)*std::sin(a)));
+   const V z=body*bodySign;
+   const V x=unit(seamX-z*seamX.dot(z));
+   frame={x,unit(z.cross(x)),z};
+  }
+  const auto [x,y,z]=applyAngles(frame,options.offsets[i].angles);
   path.toolX[i]=x;
   path.toolY[i]=y;
   path.toolZ[i]=z;

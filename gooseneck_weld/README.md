@@ -1,4 +1,4 @@
-# 鹅颈槽焊缝 SDK 1.0.1
+# 鹅颈槽焊缝 SDK 1.0.2
 
 Ubuntu 22.04 / ROS 2 Humble 的独立 C++ SDK，与波纹板 SDK 分开安装。来自用户在 Windows 验证的移植包，提取核心保留原来的几何逻辑。原始压缩包存于 [upstream](upstream/gooseneck_weld_portable.zip)，SHA256：`a0c5b9b7b4df92ece23932858db069263927120d4a213e04cc90c508be37b601`。桌面原文件未修改。
 
@@ -23,7 +23,7 @@ Ubuntu 22.04 / ROS 2 Humble 的独立 C++ SDK，与波纹板 SDK 分开安装。
 | 参考结构 | L底板、波纹侧面与周期四类角 | 两平行立面和底板，识别一个或多个U槽 |
 | 红色焊缝 | 当前稳定SDK的平面/法向/轮廓流程 | XYZ几何，分层侧边接触线，局部底面中值及L圆角高度补偿 |
 | 轨迹 | 三种path.mode，四类角/圆角与直线中点 | 每槽固定8点，竖缝、底部四个转角及两个安全点 |
-| 默认姿态 | 当前配置的旧角点继承策略 | 取横向底缝方向与底板/前脸法向构建共享姿态，零角补偿时8点姿态一致 |
+| 默认姿态 | 当前配置的旧角点继承策略 | 共享参考姿态 + 可调左右侧板外倾；关闭整体修正时复现原包 |
 | 平移补偿 | `offset.*` 沿工件坐标轴 | `gooseneck.*.dx/dy/dz` 沿相机XYZ |
 | ROS输出 | mm CSV、相机PoseArray(m)、wxyz列 | 相同，继续复用手眼与ABB节点 |
 
@@ -43,7 +43,19 @@ Ubuntu 22.04 / ROS 2 Humble 的独立 C++ SDK，与波纹板 SDK 分开安装。
 
 `gooseneck.tool_x_positive=true` 是1.0.1起的默认值，保留原包工具X。按当前手眼矩阵，历史样本的该轴与拍照TCP +X点积约+0.941；此前1.0.0默认反向时约−0.941，会引入不必要的近反向姿态，因此已纠正。`false` 仍可主动反向工具X/Y、保持Z不变（绕工具Z旋转180°），切换不改变零补偿点位。不能从两个算法里“workpiece X”这个名称直接推断实际TCP一致；物理相机安装、TCP和标定沿用原系统，首次联调仍需核对实际目标姿态。
 
-`gooseneck.tool_z_to_body=false` 表示 +Z 从枪体指向TCP；true相反。零角补偿时所有点使用原包的同一共享框架；每点roll、pitch、yaw依次绕当前工具局部X、Y、Z旋转，单位度。改变工具X符号也会改变局部轴角补偿的物理含义，应先确定轴向再调角。
+`gooseneck.tool_z_to_body=false` 表示 +Z 从枪体指向TCP；true相反。整体修正和逐点角补偿均为0时，所有点使用原包的同一共享框架；每点roll、pitch、yaw依次绕当前工具局部X、Y、Z旋转，单位度。改变工具X符号也会改变局部轴角补偿的物理含义，应先确定轴向再调角。
+
+### 侧板避让姿态（1.0.2）
+
+原包的8点共享角平分线姿态会使枪轴近似平行于左右侧板。单槽160336的已观测点云中，P2/P3从TCP往枪体方向15–80mm的轴线距左侧板点云仅约0.6–0.8mm；这只是线与可见点云的距离，不是完整枪体与工件的真实间隙，但不能忽略。
+
+- `gooseneck.side_lean_deg`：0–20°，SDK默认0；**ROS鹅颈槽配置当前选10°作为待实机验收候选**。P1–P4向槽左外侧、P5–P8向槽右外侧倾斜，左右镜像。安全点和相邻焊点同侧倾角；横向直线P4→P5有约2倍外倾角的姿态插值。
+- `gooseneck.body_tilt_deg`：−30–30°，默认0。在原约45°参考姿态上修正；正值朝底板朝上法向抬枪、远离底板但更靠近前立面；负值相反。**它不能替代左右侧板外倾**。
+- 修正顺序：原共享框架 → 整体抬枪 → 左右侧板外倾 → 逐点roll/pitch/yaw。取点、ROI、点位、安全点XYZ、点序、手眼和ABB协议均不变。
+- Z向侧面倾斜时，X不可能既完全固定又与Z正交。实现取原X参考在新Z垂直平面内的最近投影，保留正反方向；10°外倾时X也约偏转10°，**不是180°翻转**。逐点角补偿会进一步改变轴向。
+- 设两项均0即可复现1.0.1的位姿，不必回退识别算法。SDK不传参数仍为0/0，原包基线回归继续有效。
+
+白线始终是TCP→枪体；当`tool_z_to_body=false`时与工具+Z相反。45°只是普通角接的常见工艺参考，不是防撞依据；喷嘴半径、焊丝伸出、枪颈形状、机器人逆解与完整工件都未建模，不能把轴线间距当作枪体净空。[Miller角接焊枪定位说明](https://www.millerwelds.com/en-US/resources/knowledge-hub/mig-welding/how-to/understanding-the-basics-of-mig-welding-for-mild-steel)
 
 两端安全点的位置先继承邻接焊点的XYZ补偿，再叠加本点补偿；退让方向仍按原包从竖缝开放侧计算。安全点自身的姿态角补偿独立，不自动复制邻接焊点的角补偿。平移上限±100mm、角度±180°是输入校验范围，不是机械臂可达范围。
 
@@ -85,6 +97,8 @@ python3 scripts/offline_weld.py \
 
 输出 `<前缀>_features.csv`、`_result.ply`、`_feature_points.ply`、`_settings.conf`。settings记录实际ROI/补偿/方向和检测到的槽数。CSV包含槽号、角色、原始和补偿位置、四元数、工具X及物理枪体轴。result.ply保留分割颜色和红色焊缝，只叠加所选槽的轨迹；黄绿色箭头为工具+X、白线为物理枪体方向。
 
+1.0.2 CSV追加`body_tilt_deg`、`side_lean_deg`和`body_angle_to_base_deg`，最后一个字段按最终逐点补偿后的物理枪体轴与底板平面计算夹角（正值朝底板上方）。`pose_source=outward_side_lean_frame`表示启用侧板外倾，`tilted_transverse_frame`表示仅整体抬枪；界面选中行可查看角度。
+
 ## 界面和launch
 
 原命令继续默认波纹板。人工界面在算法页选 `gooseneck`，进入“鹅颈槽参数与逐点补偿”，预览并确认后才写入本次传入的配置文件。选择历史PLY和预览不会保存正式参数。此前“未在YAML中启用的参数编辑后不写入”的默认值比较错误已修复，写入后回读校验并打印配置路径。
@@ -101,6 +115,8 @@ ros2 launch cimc camera_weld_operator_abb.launch.py \
 ## 本次离线验收
 
 `python3 gooseneck_weld/tests/regression.py` 从原始zip编译基线，比较四份真实点云（两单槽、两双槽），每个槽的XYZ和原X姿态一致；另验证X/Y翻转、Z保持、四元数单位长度和右手性、逐点补偿、竖缝长度、安全退距、确定性和无效槽号拒绝。两份不满足参考平面条件的样本在原包和新SDK中均拒绝，未把它们计为成功。
+
+1.0.2另对四份点云的每个槽验证±15°抬枪、10°左右外倾和组合修正：所有XYZ不变，左右枪体分量方向正确，工具X取最近投影，改变X/Z符号不改变物理避让方向，0修正仍与原包相同。这里只验证数值和接口，不证明实际无碰撞。
 
 1.0.0结果在 `operator_sessions/gooseneck_integration/`，其single默认X为旧的反向候选；1.0.1当前TCP约定下的结果在 `operator_sessions/gooseneck_same_tcp_validation/`，请优先查看该目录。`test/offline_backends.py` 位于ROS适配包下，使用隔离ROS域224，仅运行算法节点和测试订阅器，核对话题和离线CLI结果一致；不会运行相机、手眼、ABB接收或执行器节点。`src/cimc/test/test_gooseneck_tcp_contract.py` 另使用生产桥接回调、当前手眼和模拟拍照位姿在内存中验证8点到ABB毫米/wxyz文本，全部发布器为内存记录器，不创建ROS节点或socket。
 
