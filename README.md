@@ -1,6 +1,6 @@
 # 华南理工大学智能焊接实验室 · x86 ROS 2 工作区
 
-> Ubuntu 22.04 · ROS 2 Humble · Chishine 3D 相机 · 波纹板焊缝识别 · 手眼变换 · ABB TCP
+> Ubuntu 22.04 · ROS 2 Humble · Chishine 3D 相机 · 波纹板 / 鹅颈槽 · 手眼变换 · ABB TCP
 
 本仓库的当前主线任务是：收到 ABB 的拍照位姿，采集点云，提取焊接轨迹，把相机坐标系下的位姿转换到机器人基坐标系，再将轨迹发回 ABB。焊机、电机和第三方焊接决策代码仍保留在仓库中，**不属于当前总 launch 的运行链路**。
 
@@ -11,6 +11,7 @@
 
 | 我想做什么 | 阅读位置 |
 | --- | --- |
+| 在新 Ubuntu 22.04 工控机上部署、迁移与验收 | **[新工控机快速部署](快速部署.md)** |
 | 启动人工 ROI/参数复核，再连续处理 ABB 请求 | [人工标定与自动运行](src/cimc/人工标定与自动运行.md) |
 | 固定夹具、不打开标定窗口直接运行 | [实际启动与分节点测试手册](实际启动与分节点测试手册.md) |
 | 查节点、话题、QoS 和数据单位 | [ROS 2 节点与接口](ROS2全部节点与接口说明.md) |
@@ -19,6 +20,32 @@
 | 切换鹅颈槽、调八点姿态与偏移、验证移植效果 | [鹅颈槽独立 SDK](gooseneck_weld/README.md) · [鹅颈槽 YAML](src/weld_seam_perception/config/gooseneck.yaml) |
 | 查相机参数和实时 ROI 查看器 | [相机 ROS 包](src/chishine_camera_ros2/README.md) · [实时查看器](x86_chishine_live_viewer/README.md) |
 | 查 ABB/手眼实现与第三方历史接口 | [cimc 包](src/cimc/README.md) · [第三方协议](第三方焊接通信协议.md) |
+
+## 新工控机快速部署
+
+当前提供的是**可从 Git 重建的源码部署流程**，不是一键 `.deb` 安装包。标准目标为 Ubuntu 22.04 **amd64/x86_64 桌面版**、系统 Python 3.10、ROS 2 Humble；推荐保留用户 `mini` 和路径 `/home/mini/x86_ros2_ws`，避免现有绝对路径失效。
+
+| 阶段 | 操作 | 验收后再继续 |
+| --- | --- | --- |
+| 1 · 基础环境 | 安装 ROS 2 Humble、PCL、Eigen、Tk、中文字体 | [系统与依赖命令](快速部署.md#1-安装系统依赖与-ros-2-humble) |
+| 2 · 拉取与迁移 | 克隆私有仓库，另外转移现场 YAML、标定矩阵和测试 PLY | [源码和设备参数](快速部署.md#2-克隆源码并检查相机-sdk)；不要只复制旧 `install/` |
+| 3 · 构建 | **先波纹板 SDK → 鹅颈槽 SDK → 实时查看器 → 3 个 ROS 包** | [完整构建命令](快速部署.md#4-按顺序构建无需连接硬件)；显式指定仓库内相机 SDK |
+| 4 · 离线验收 | 检查动态库、跑软件测试、历史 PLY 和独立参数窗口 | [离线验收](快速部署.md#5-纯软件与历史点云验收)；此时不运行 ABB 总 launch |
+| 5 · 现场交付 | 设置网卡、复核 TCP/标定/ROI，先存点再低速空走 | [现场配置与启动](快速部署.md#6-现场网络与首次安全启动由现场人员执行)；最后才允许焊接 |
+
+依赖安装完成后，使用已授权的 GitHub SSH 身份获取源码：
+
+```bash
+cd /home/mini
+git clone git@github.com:Luckme921/cimc.git x86_ros2_ws
+cd /home/mini/x86_ros2_ws
+git rev-parse HEAD
+```
+
+仓库已包含相机 x86_64 SDK 最小子集和两种算法源码，**无需依赖旧电脑上工作区以外的 SDK 目录**；但历史点云、预览结果、未提交的现场参数不随 `git clone` 自动迁移。相机 SDK 有厂商授权限制；商业交付前须复核 [第三方许可](src/chishine_camera_ros2/THIRD_PARTY_NOTICES.md)。
+
+> [!IMPORTANT]
+> 新机部署不能直接启动总 launch 验证：仓库的手眼配置目前为 `send_to_abb=true`。先按[快速部署手册](快速部署.md)完成离线验收，再由现场人员确认网络、设备标定和机器人安全状态。实际完成的软件验证与未验证边界记录在[验收记录](快速部署.md#8-本次部署流程验证记录)。
 
 ## 当前运行链路
 
