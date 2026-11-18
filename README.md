@@ -16,6 +16,7 @@
 | 查节点、话题、QoS 和数据单位 | [ROS 2 节点与接口](ROS2全部节点与接口说明.md) |
 | 调焊缝 ROI、角点、姿态与偏移 | [焊缝节点说明](src/weld_seam_perception/README.md) · [当前 YAML](src/weld_seam_perception/config/weld_seam.yaml) |
 | 查算法 C++、SDK 构建或独立 PLY 测试 | [工作区内算法源码](x86_weld_seam_test/README.md) |
+| 切换鹅颈槽、调八点姿态与偏移、验证移植效果 | [鹅颈槽独立 SDK](gooseneck_weld/README.md) · [鹅颈槽 YAML](src/weld_seam_perception/config/gooseneck.yaml) |
 | 查相机参数和实时 ROI 查看器 | [相机 ROS 包](src/chishine_camera_ros2/README.md) · [实时查看器](x86_chishine_live_viewer/README.md) |
 | 查 ABB/手眼实现与第三方历史接口 | [cimc 包](src/cimc/README.md) · [第三方协议](第三方焊接通信协议.md) |
 
@@ -70,6 +71,8 @@ source /home/mini/x86_ros2_ws/install/setup.bash
 | ABB TCP | [`src/cimc/config/data_receiver.yaml`](src/cimc/config/data_receiver.yaml) | 本机监听地址、ABB 来源 IP、第三方通道开关 |
 
 当前焊缝 YAML 使用 `path.mode=rounded_features`，且已启用特定拍照位置的 X/Y ROI 和分类偏移；**不能把它当作所有工件、所有拍照位的通用参数**。`feature_points` 是旧单角点模式，`adaptive_contour` 是备用模式。三种模式输出接口相同，但点数、姿态和可达性均须分别检查。
+
+鹅颈槽为独立算法后端，`algorithm_overrides` 中的 `pipeline.algorithm=gooseneck` 启用；省略或设为 `corrugated` 时保持波纹板算法。操作窗口增加算法选择与“鹅颈槽参数与逐点补偿”页。也可在原 launch 末尾加 `weld_params_file:=/home/mini/x86_ros2_ws/src/weld_seam_perception/config/gooseneck.yaml`，使用独立配置而保留波纹板现场参数。每次选择一个槽输出8点，原手眼、ABB协议和100点限制继续适用。工具X反向与姿态含义见鹅颈槽README，尚未进行真实硬件验证。
 
 ## 构建与算法版本
 

@@ -1,0 +1,89 @@
+# 鹅颈槽独立配置；默认的 weld_seam.yaml 与波纹板算法不受影响。
+# 总launch可用 weld_params_file:=.../gooseneck.yaml 选择此配置。
+# 毫米相机坐标 + wxyz 四元数 -> 复用现有手眼与ABB链路。
+weld_seam_node:
+  ros__parameters:
+    input_ply_topic: /camera/pointcloud_file
+    output_directory: ""
+    output_prefix: gooseneck
+    config_file: ""
+    frame_id: camera_link
+    position_scale_to_ros: 0.001
+    auto_process: true
+    algorithm_overrides:
+      - "pipeline.algorithm=gooseneck"
+      # 已裁剪点云默认不再裁剪；全幅取景需保留底板和两平行立面的支持。
+      - "roi.enable=false"
+      - "roi.min_x=-inf"
+      - "roi.max_x=inf"
+      - "roi.min_y=-inf"
+      - "roi.max_y=inf"
+      - "roi.min_z=-inf"
+      - "roi.max_z=inf"
+      # 每槽8点：safe_start,weld_start,corner_1..4,weld_end,safe_end。
+      # 槽号按参考横轴(+相机X为正)排序，从1开始。一次仅输出一个完整槽，
+      # 不将槽与槽之间的移动误拼接成焊接轨迹，远低于ABB的100点上限。
+      - "gooseneck.groove_index=1"
+      # 两端竖缝从底部起的高度上限，默认40mm，并非路径总长。
+      # 输出端点吸附真实焊缝采样，实际高度可能略小于该值。
+      - "gooseneck.vertical_length_mm=40"
+      # 沿两端开放侧的退让距离，默认30mm。不会改变角点位置。
+      - "gooseneck.clearance_mm=30"
+      # false：反向移植包的工具X；Y同时反向，Z不变(绕工具Z转180°)。
+      # true：复现Win移植包的原始工具X。两个工件的workpiece X命名
+      # 不保证物理方向相同，真机前必须与当前ABB TCP定义核对。
+      - "gooseneck.tool_x_positive=false"
+      # false：+Z为枪体→TCP，与当前现场工具+Z约定一致。
+      - "gooseneck.tool_z_to_body=false"
+      # 每点平移沿相机XYZ，单位mm；roll/pitch/yaw依次绕当前工具局部
+      # X/Y/Z轴，单位度。与波纹板offset.*的工件轴补偿互不混用。
+      # 相同参数应用于所选槽。安全点位置先继承邻接焊点补偿，
+      # 再叠加自身dx/dy/dz；安全点姿态的角度由自身roll/pitch/yaw决定。
+      - "gooseneck.safe_start.dx=0"
+      - "gooseneck.safe_start.dy=0"
+      - "gooseneck.safe_start.dz=0"
+      - "gooseneck.safe_start.roll=0"
+      - "gooseneck.safe_start.pitch=0"
+      - "gooseneck.safe_start.yaw=0"
+      - "gooseneck.weld_start.dx=0"
+      - "gooseneck.weld_start.dy=0"
+      - "gooseneck.weld_start.dz=0"
+      - "gooseneck.weld_start.roll=0"
+      - "gooseneck.weld_start.pitch=0"
+      - "gooseneck.weld_start.yaw=0"
+      - "gooseneck.corner_1.dx=0"
+      - "gooseneck.corner_1.dy=0"
+      - "gooseneck.corner_1.dz=0"
+      - "gooseneck.corner_1.roll=0"
+      - "gooseneck.corner_1.pitch=0"
+      - "gooseneck.corner_1.yaw=0"
+      - "gooseneck.corner_2.dx=0"
+      - "gooseneck.corner_2.dy=0"
+      - "gooseneck.corner_2.dz=0"
+      - "gooseneck.corner_2.roll=0"
+      - "gooseneck.corner_2.pitch=0"
+      - "gooseneck.corner_2.yaw=0"
+      - "gooseneck.corner_3.dx=0"
+      - "gooseneck.corner_3.dy=0"
+      - "gooseneck.corner_3.dz=0"
+      - "gooseneck.corner_3.roll=0"
+      - "gooseneck.corner_3.pitch=0"
+      - "gooseneck.corner_3.yaw=0"
+      - "gooseneck.corner_4.dx=0"
+      - "gooseneck.corner_4.dy=0"
+      - "gooseneck.corner_4.dz=0"
+      - "gooseneck.corner_4.roll=0"
+      - "gooseneck.corner_4.pitch=0"
+      - "gooseneck.corner_4.yaw=0"
+      - "gooseneck.weld_end.dx=0"
+      - "gooseneck.weld_end.dy=0"
+      - "gooseneck.weld_end.dz=0"
+      - "gooseneck.weld_end.roll=0"
+      - "gooseneck.weld_end.pitch=0"
+      - "gooseneck.weld_end.yaw=0"
+      - "gooseneck.safe_end.dx=0"
+      - "gooseneck.safe_end.dy=0"
+      - "gooseneck.safe_end.dz=0"
+      - "gooseneck.safe_end.roll=0"
+      - "gooseneck.safe_end.pitch=0"
+      - "gooseneck.safe_end.yaw=0"

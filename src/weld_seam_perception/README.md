@@ -2,6 +2,8 @@
 
 该包是焊缝 SDK 的轻量 ROS 2 适配层。算法不复制到本包，也不通过 shell 启动 CLI；节点直接链接工作区内 `x86_weld_seam_test/install` 的 `libweld_seam_sdk.so`，接收 PLY 路径并发布结构化结果。当前 CMake 要求 SDK 至少 2.4.10；启动日志中的版本才是实际加载的运行库版本。工作区源码版本与已安装库可能不同；修改算法源码后仍须重新编译、安装 SDK 并重建本包。
 
+现另链接工作区 `gooseneck_weld/install/lib/libgooseneck_sdk.so`。`algorithm_overrides` 中省略 `pipeline.algorithm` 或设为 `corrugated` 时，继续调用原波纹板SDK；设为 `gooseneck` 时只向鹅颈槽SDK传入 `gooseneck.*` 和共享 `roi.*`，波纹板偏移/姿态键不参与鹅颈槽计算。节点和离线界面采用相同分流规则，状态JSON新增 `algorithm` 字段，其他话题、单位、手眼和ABB文本协议保持一致。独立参数见 [gooseneck.yaml](config/gooseneck.yaml)，构建和验收见 [鹅颈槽SDK](../../gooseneck_weld/README.md)。
+
 ## 文件作用
 
 | 文件 | 作用 |
@@ -98,6 +100,16 @@ cmake --install build --prefix /home/mini/x86_ros2_ws/x86_weld_seam_test/install
 ```
 
 再构建本包：
+
+首次部署需要先构建并安装鹅颈槽SDK（旧波纹板SDK不用改动）：
+
+```bash
+cd /home/mini/x86_ros2_ws
+cmake -S gooseneck_weld -B build/gooseneck_sdk -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/home/mini/x86_ros2_ws/gooseneck_weld/install
+cmake --build build/gooseneck_sdk -j2
+cmake --install build/gooseneck_sdk
+```
 
 ```bash
 source /opt/ros/humble/setup.bash

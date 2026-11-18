@@ -5,6 +5,8 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include <weld_seam_sdk/weld_seam_sdk.hpp>
+#include <gooseneck_sdk/gooseneck_sdk.hpp>
+#include <weld_seam_perception/backend.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -101,6 +103,7 @@ public:
         auto_process_ = declare_parameter<bool>("auto_process", true);
         parameter_overrides_ = declare_parameter<std::vector<std::string>>(
             "algorithm_overrides", std::vector<std::string>{});
+        backend_ = weld_backend::select(parameter_overrides_);
         if (!std::isfinite(position_scale_to_ros_) ||
             position_scale_to_ros_ <= 0.0) {
             throw std::invalid_argument(
@@ -126,9 +129,11 @@ public:
 
         RCLCPP_INFO(get_logger(),
             "Weld seam SDK %s ready; input topic=%s, output=%s, auto_process=%s",
-            weld_seam_sdk::version(), input_topic_.c_str(),
+            backend_.name == "gooseneck" ? gooseneck_sdk::version() : weld_seam_sdk::version(), input_topic_.c_str(),
             output_directory_.c_str(),
             auto_process_ ? "true" : "false");
+        RCLCPP_INFO(get_logger(), "当前焊缝算法：%s；参数来自启动时 YAML，修改后请重启节点。",
+            backend_.name.c_str());
     }
 
 private:
@@ -188,10 +193,11 @@ private:
         const std::filesystem::path input_path(input_ply);
         options.output_prefix = output_prefix_ + "_" + input_path.stem().string();
         options.config_file = config_file_;
-        options.parameter_overrides = parameter_overrides_;
+        options.parameter_overrides = backend_.parameters;
 
         RCLCPP_INFO(get_logger(), "Extracting weld seam from: %s", input_ply.c_str());
-        const weld_seam_sdk::RunResult result = weld_seam_sdk::run(options);
+        const weld_seam_sdk::RunResult result = backend_.name == "gooseneck"
+            ? gooseneck_sdk::run(options) : weld_seam_sdk::run(options);
         publishStatus(result, input_ply);
         if (result.status != 0) {
             RCLCPP_ERROR(get_logger(), "Extraction failed: %s", result.message.c_str());
@@ -230,6 +236,7 @@ private:
         std_msgs::msg::String status;
         std::ostringstream stream;
         stream << "{\"status\":" << result.status
+               << ",\"algorithm\":\"" << backend_.name << "\""
                << ",\"message\":\"" << jsonEscape(result.message) << "\""
                << ",\"input_ply\":\"" << jsonEscape(input_ply) << "\""
                << ",\"csv\":\"" << jsonEscape(result.csv_path) << "\""
@@ -299,6 +306,7 @@ private:
     double position_scale_to_ros_ = 0.001;
     bool auto_process_ = true;
     std::vector<std::string> parameter_overrides_;
+    weld_backend::Selection backend_;
 
     std::mutex latest_path_mutex_;
     std::mutex processing_mutex_;

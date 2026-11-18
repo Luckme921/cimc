@@ -199,6 +199,35 @@ class OperatorConfigTest(unittest.TestCase):
         updated = replace_active_overrides(self.weld_text, changes)
         self.assertEqual(active_overrides(updated)['path.rounded_corner_spacing'], '4')
 
+    def test_editing_previously_absent_offset_is_written(self):
+        form = self.make_form()
+        key = 'offset.straight_right_waist.x'
+        form.original.pop(key, None)
+        form.vars[key].value = '1.75'
+        self.assertEqual(form.changes()[key], '1.75')
+        text = replace_active_overrides(self.weld_text, form.changes())
+        self.assertEqual(active_overrides(text)[key], '1.75')
+
+    def test_switch_gooseneck_and_new_rotation_are_written(self):
+        from cimc.weld_algorithm import GOOSENECK_DEFAULTS, select_backend
+        form = self.make_form()
+        form.vars.update({key: Value(value) for key, value in GOOSENECK_DEFAULTS.items()})
+        form.vars['pipeline.algorithm'] = Value('gooseneck')
+        form.vars['gooseneck.corner_2.pitch'] = Value('6')
+        changes = form.changes()
+        text = replace_active_overrides(self.weld_text, changes)
+        settings = active_overrides(text)
+        self.assertEqual(settings['pipeline.algorithm'], 'gooseneck')
+        self.assertEqual(settings['gooseneck.corner_2.pitch'], '6')
+        name, values = select_backend(settings)
+        self.assertEqual(name, 'gooseneck')
+        self.assertNotIn('path.mode', values)
+        self.assertNotIn('offset.protruding_left.x', values)
+        settings['pipeline.algorithm'] = 'corrugated'
+        _name, values = select_backend(settings)
+        self.assertIn('path.mode', values)
+        self.assertNotIn('gooseneck.corner_2.pitch', values)
+
     def test_reject_exposure_longer_than_frame_and_even_corner_count(self):
         form = self.make_form()
         form.camera_vars['depth_exposure'].value = '25000'

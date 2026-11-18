@@ -22,6 +22,14 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 import yaml
 
+try:
+    from cimc.weld_algorithm import (BACKENDS, GOOSENECK_DEFAULTS, GOOSENECK_FIELDS,
+                                    GOOSENECK_ROLES, preview_command, validate_gooseneck)
+except ModuleNotFoundError:
+    # The manual launch also executes this source file directly.
+    from weld_algorithm import (BACKENDS, GOOSENECK_DEFAULTS, GOOSENECK_FIELDS,
+                                GOOSENECK_ROLES, preview_command, validate_gooseneck)
+
 
 GROUP_DEFAULTS = {
     'start_transition': (0, 0, 0),
@@ -60,6 +68,15 @@ WELD_COMMON = (
 )
 HANDEYE_FIELDS = ('matrix_file', 'matrix_key', 'matrix_direction',
                   'matrix_translation_unit')
+PARAMETER_DEFAULTS = {
+    'pipeline.algorithm': 'corrugated', 'roi.enable': 'false',
+    'path.mode': 'feature_points',
+    **{key: '-inf' if 'min_' in key else 'inf' for key in ROI_KEYS[1:]},
+    **{f'offset.{group}.{axis}': str(default)
+       for group, defaults in GROUP_DEFAULTS.items() for axis, default in zip('xyz', defaults)},
+    **{key: default for key, _label, default in WELD_COMMON},
+    **GOOSENECK_DEFAULTS,
+}
 
 
 def preview_failure_explanation(output):
@@ -353,7 +370,9 @@ class PreviewWindow:
         table_frame.pack(fill='both', expand=True)
         self.table = ttk.Treeview(table_frame, columns=columns, show='headings',
                                   selectmode='browse')
-        headings = ('点序号', '特征类型', 'YAML 偏移组', '实际偏移 X/Y/Z mm',
+        goose = bool(rows and rows[0].get('tool_x_reference') == 'gooseneck_transverse')
+        headings = ('点序号', '特征类型', 'YAML 偏移组',
+                    '相机偏移 X/Y/Z mm' if goose else '实际偏移 X/Y/Z mm',
                     '点来源', '相机 XYZ mm', '工件 XYZ mm')
         widths = (65, 290, 190, 160, 250, 175, 175)
         for column, title, width in zip(columns, headings, widths):
@@ -379,9 +398,11 @@ class PreviewWindow:
             if self.group.get() not in ('全部', row['position_offset_group']):
                 continue
             order = int(row['order'])
+            offset_frame = ('camera' if row.get('tool_x_reference') == 'gooseneck_transverse'
+                            else 'workpiece')
             values = (
                 f'P{order + 1}', row['feature_type'], row['position_offset_group'],
-                '/'.join(row[f'applied_offset_workpiece_{axis}'] for axis in 'xyz'),
+                '/'.join(row[f'applied_offset_{offset_frame}_{axis}'] for axis in 'xyz'),
                 row['point_source'],
                 '/'.join(row[axis] for axis in 'xyz'),
                 '/'.join(row[f'workpiece_{axis}'] for axis in 'xyz'),
@@ -401,6 +422,13 @@ class PreviewWindow:
         except ValueError:
             return
         group = row['position_offset_group']
+        if row.get('tool_x_reference') == 'gooseneck_transverse':
+            self.detail.set(
+                f"P{int(row['order']) + 1} · 槽 {row['groove']} → {row['feature_type']}；"
+                f'YAML：gooseneck.{group}.dx / dy / dz（相机轴 mm）；'
+                f'roll / pitch / yaw（工具局部轴 °）；'
+                f"当前旋转：{row['roll']}/{row['pitch']}/{row['yaw']}°。")
+            return
         self.detail.set(
             f"P{int(row['order']) + 1} → {row['feature_type']}；"
             f"对应 YAML：offset.{group}.x / .y / .z；"
@@ -530,6 +558,8 @@ class SetupWindow:
                 self.vars[key] = tk.StringVar(value=self.original.get(key, str(default)))
         for key, _label, default in WELD_COMMON:
             self.vars[key] = tk.StringVar(value=self.original.get(key, default))
+        for key, default in {'pipeline.algorithm': 'corrugated', **GOOSENECK_DEFAULTS}.items():
+            self.vars[key] = tk.StringVar(value=self.original.get(key, default))
         self.camera_vars = {key: tk.StringVar(value=str(self.camera_params[key]))
                             for key, _label in CAMERA_FIELDS}
         self.handeye_vars = {key: tk.StringVar(value=str(self.handeye_params[key]))
@@ -618,6 +648,55 @@ class SetupWindow:
         point_page = ttk.Frame(offset_pages, padding=10)
         offset_pages.add(common_page, text='  算法与常用参数  ')
         offset_pages.add(point_page, text='  分类点位偏移  ')
+        goose_tab = ttk.Frame(offset_pages)
+        offset_pages.add(goose_tab, text='  鹅颈槽参数与逐点补偿  ')
+        goose_canvas = tk.Canvas(goose_tab, highlightthickness=0, background='#f5f8fb')
+        goose_scroll = ttk.Scrollbar(goose_tab, orient='vertical', command=goose_canvas.yview)
+        goose_scroll.pack(side='right', fill='y')
+        goose_canvas.pack(side='left', fill='both', expand=True)
+        goose_canvas.configure(yscrollcommand=goose_scroll.set)
+        goose_page = ttk.Frame(goose_canvas, padding=10)
+        goose_inner = goose_canvas.create_window((0, 0), window=goose_page, anchor='nw')
+        goose_page.bind('<Configure>', lambda _event: goose_canvas.configure(
+            scrollregion=goose_canvas.bbox('all')))
+        goose_canvas.bind('<Configure>', lambda event: goose_canvas.itemconfigure(
+            goose_inner, width=event.width))
+
+        backend_box = ttk.LabelFrame(common_page, text='工件算法 · 确认后写入 YAML', padding=10)
+        backend_box.pack(fill='x', pady=(0, 8))
+        ttk.Combobox(backend_box, textvariable=self.vars['pipeline.algorithm'],
+                     values=BACKENDS, state='readonly', width=20).pack(side='left')
+        ttk.Label(backend_box, text='corrugated 波纹板 / gooseneck 鹅颈槽；下方 path.mode 仅用于波纹板',
+                  style='Muted.TLabel').pack(side='left', padx=10)
+
+        goose_common = ttk.LabelFrame(goose_page, text='单次选择一个槽输出 8 点', padding=10)
+        goose_common.pack(fill='x')
+        for row, (key, label) in enumerate((
+                ('gooseneck.vertical_length_mm', '两端竖缝长度上限 / mm'),
+                ('gooseneck.clearance_mm', '起止安全退距 / mm'),
+                ('gooseneck.groove_index', '槽号（按相机横向从小到大，起始1）'),
+                ('gooseneck.tool_x_positive', '工具 X：false 反向 / true 复现移植包'),
+                ('gooseneck.tool_z_to_body', '工具 +Z：false 枪体→TCP / true TCP→枪体'))):
+            ttk.Label(goose_common, text=label).grid(row=row, column=0, sticky='w', pady=3)
+            if key.endswith(('tool_x_positive', 'tool_z_to_body')):
+                widget = ttk.Combobox(goose_common, textvariable=self.vars[key],
+                                      values=('false', 'true'), state='readonly', width=15)
+            else:
+                widget = ttk.Entry(goose_common, textvariable=self.vars[key], width=17)
+            widget.grid(row=row, column=1, padx=12)
+        goose_offsets = ttk.LabelFrame(goose_page, text='鹅颈槽：相机 XYZ 平移 / mm；工具局部 X/Y/Z 旋转 / °', padding=10)
+        goose_offsets.pack(fill='x', pady=8)
+        for column, title in enumerate(('点角色', *GOOSENECK_FIELDS)):
+            ttk.Label(goose_offsets, text=title).grid(row=0, column=column, padx=5)
+        for row, (role, label) in enumerate(GOOSENECK_ROLES, 1):
+            ttk.Label(goose_offsets, text=f'{role} · {label}').grid(row=row, column=0, sticky='w', pady=3)
+            for column, field in enumerate(GOOSENECK_FIELDS, 1):
+                ttk.Entry(goose_offsets, textvariable=self.vars[f'gooseneck.{role}.{field}'],
+                          width=9).grid(row=row, column=column, padx=5)
+        ttk.Label(goose_page, text='ROI 共用“点云与 ROI”页。鹅颈槽独立补偿不使用波纹板 offset.*。'
+                  '安全点位置先继承邻接焊点补偿再叠加自身补偿。'
+                  '工具 X 翻转会改变绕 Z 的角度180°，真机前须核对TCP轴。',
+                  wraplength=950).pack(anchor='w')
 
         mode_box = ttk.LabelFrame(common_page, text='路径算法', padding=12)
         mode_box.pack(fill='x', pady=(0, 10))
@@ -862,6 +941,9 @@ class SetupWindow:
                 if not math.isfinite(number) or abs(number) > 100:
                     raise ValueError(f'{key} 必须是有限数，绝对值不超过 100 mm')
                 value = format(number, '.9g')
+            elif key.startswith('gooseneck.') and key not in (
+                    'gooseneck.tool_x_positive', 'gooseneck.tool_z_to_body'):
+                value = format(float(value), '.15g')
             elif key == 'path.rounded_corner_point_count':
                 count = int(value)
                 if str(count) != value or count < 1 or count > 9 or count % 2 != 1:
@@ -880,6 +962,9 @@ class SetupWindow:
             wanted[key] = value
         if wanted['roi.enable'] not in ('true', 'false') or wanted['path.mode'] not in MODES:
             raise ValueError('ROI 开关或算法模式无效')
+        if wanted.get('pipeline.algorithm', 'corrugated') not in BACKENDS:
+            raise ValueError('工件算法选择无效')
+        validate_gooseneck(wanted)
         for axis in 'xyz':
             if float(wanted[f'roi.min_{axis}']) > float(wanted[f'roi.max_{axis}']):
                 raise ValueError(f'ROI {axis.upper()} 最小值大于最大值')
@@ -888,8 +973,10 @@ class SetupWindow:
             raise ValueError('安全点 +Y 和 +Z 不可同时为 0')
         changes = {}
         for key, value in wanted.items():
-            previous = self.original.get(key, value)
+            previous = self.original.get(key, PARAMETER_DEFAULTS.get(key, value))
             if (key.startswith('offset.') or
+                    (key.startswith('gooseneck.') and key not in (
+                        'gooseneck.tool_x_positive', 'gooseneck.tool_z_to_body')) or
                     (key.startswith('roi.') and key != 'roi.enable') or
                     key in {item[0] for item in WELD_COMMON}):
                 # YAML often spells the same number as 1.000 or 188.380. Do not
@@ -1058,18 +1145,12 @@ class SetupWindow:
             handeye_changes, _matrix, matrix_digest = self.handeye_changes()
             overrides = dict(self.original)
             overrides.update(changes)
-            exe = self.workspace / 'x86_weld_seam_test/install/bin/weld_seam_extractor'
-            if not exe.is_file():
-                raise FileNotFoundError(f'已安装 SDK 离线程序不存在：{exe}')
             self.preview_index += 1
             prefix = f'operator_preview_{self.preview_index:03d}'
-            command = [str(exe), str(self.ply), str(self.session), prefix]
             config_file = yaml.safe_load(self.original_text)[
                 'weld_seam_node']['ros__parameters'].get('config_file', '')
-            if config_file:
-                command += ['--config', str(config_file)]
-            for key, value in overrides.items():
-                command += ['--set', f'{key}={value}']
+            command = preview_command(self.workspace, self.ply, self.session,
+                                      prefix, overrides, config_file)
             started = time.perf_counter()
             result = subprocess.run(command, capture_output=True, text=True, timeout=60)
             warnings = [line.strip() for line in (result.stdout + '\n' + result.stderr).splitlines()
@@ -1185,6 +1266,9 @@ class SetupWindow:
                     temporary.write_text(updated, encoding='utf-8')
                     os.replace(temporary, path)
                     completed.append((path, before))
+                    if path.read_text(encoding='utf-8') != updated:
+                        raise OSError(f'配置写入后校验失败：{path}')
+                    print(f'[配置已写入并校验] {path}', flush=True)
                 (self.session / 'approval.json').write_text(json.dumps({
                     'approved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
                     'config': str(self.config_path), 'changes': changes,
@@ -1210,6 +1294,9 @@ class SetupWindow:
                     os.replace(temporary, path)
                 raise
             self.approved = True
+            print(f'[人工配置确认] 算法={self.vars.get("pipeline.algorithm").get() if "pipeline.algorithm" in self.vars else "corrugated"}；'
+                  f'焊缝配置={self.config_path}；变更={len(changes)}项；记录={self.session / "approval.json"}',
+                  flush=True)
             self.root.destroy()
         except Exception as exc:
             messagebox.showerror('不能启动自动链路', str(exc))

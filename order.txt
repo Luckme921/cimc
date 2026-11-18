@@ -888,3 +888,55 @@ ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=manual
 # 不需要人工窗口时，旧命令仍可单独使用，直接读取 src 配置 YAML：
 # ros2 launch cimc camera_weld_handeye_abb_test.launch.py
 # 它没有“人工确认”门禁，不能与本节的新 launch 同时运行。
+
+# ======================================================================
+# 16. 鹅颈槽独立SDK + 现有ROS链路（2026-11-18新增）
+# ======================================================================
+# 默认原launch仍用weld_seam.yaml，保持波纹板参数；新配置gooseneck.yaml
+# 每次选一个槽输出8点。槽号从1开始；不能把多个槽直接拼成连续焊接路径。
+# 偏移字段gooseneck.<角色>.dx/dy/dz沿相机轴(mm)，roll/pitch/yaw绕
+# 工具局部轴(°)。角色：safe_start,weld_start,corner_1..4,weld_end,safe_end。
+# vertical_length_mm是两端竖缝高度上限，不是路径总长；clearance_mm是安全退距。
+# tool_x_positive=false反向Win移植包X/Y，Z不变；true复现原始工具X。
+# 尚未进行真实硬件验证；首次发送前需核对TCP轴、槽号与姿态。
+
+# 16.1 完全离线：读取ROS YAML生成PLY/CSV；不启动相机或ABB
+cd /home/mini/x86_ros2_ws
+python3 scripts/offline_weld.py \
+  /home/mini/scut_weld_data/pointclouds/live_20261104_160336_814.ply \
+  /home/mini/x86_ros2_ws/operator_sessions/gooseneck_manual single \
+  --yaml /home/mini/x86_ros2_ws/src/weld_seam_perception/config/gooseneck.yaml
+# 输出single_result.ply、single_features.csv、single_settings.conf，打开result.ply检查。
+# 临时比较X方向（不写正式YAML）：
+python3 scripts/offline_weld.py \
+  /home/mini/scut_weld_data/pointclouds/live_20261104_160336_814.ply \
+  /home/mini/x86_ros2_ws/operator_sessions/gooseneck_manual original_x \
+  --yaml /home/mini/x86_ros2_ws/src/weld_seam_perception/config/gooseneck.yaml \
+  --set gooseneck.tool_x_positive=true
+# 其他临时参数示例：--set gooseneck.corner_2.dx=1.5
+# --set gooseneck.corner_2.pitch=5 --set gooseneck.vertical_length_mm=30
+# 双槽样本选第二槽：文件用live_20261104_160017_391.ply，并加
+# --set gooseneck.groove_index=2；一次仍只输出8点。
+
+# 16.2 仅打开参数窗口离线验收，不启动任何ROS节点、不连接ABB：
+source /opt/ros/humble/setup.bash
+python3 /home/mini/x86_ros2_ws/src/cimc/cimc/weld_operator_setup.py \
+  /home/mini/x86_ros2_ws \
+  /home/mini/x86_ros2_ws/src/weld_seam_perception/config/gooseneck.yaml \
+  /home/mini/x86_ros2_ws/src/chishine_camera_ros2/config/camera.yaml \
+  /home/mini/x86_ros2_ws/src/cimc/config/handeye_bridge.yaml
+# 选择历史PLY -> 在算法页选择gooseneck -> 鹅颈槽页调参数 -> 当前参数预览。
+# 预览不写正式配置；最终确认才写入传入的gooseneck.yaml，并做回读校验。
+# 这条独立Python命令确认后只退出，不会自动启动生产链路。
+
+# 16.3 现场人工确认入口（涉及相机和ABB收发，由操作员执行）：
+source /home/mini/x86_ros2_ws/install/setup.bash
+# ros2 launch cimc camera_weld_operator_abb.launch.py \
+#   weld_params_file:=/home/mini/x86_ros2_ws/src/weld_seam_perception/config/gooseneck.yaml
+# 固定流程可再加workflow_mode:=fixed；旧无界面ABB launch也支持同名weld_params_file。
+# 不加weld_params_file仍是原波纹板配置。两套launch不可同时运行。
+
+# 16.4 软件回归（无相机/ABB/执行器）：
+python3 gooseneck_weld/tests/regression.py
+# 隔离ROS域224，只启动算法节点+测试订阅器，对比ROS和离线结果：
+# python3 src/weld_seam_perception/test/offline_backends.py

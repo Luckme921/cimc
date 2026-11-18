@@ -70,7 +70,8 @@ class StatusModel:
             summary = f"{self.stage} · {body.get('message', '')}"[:180]
         elif topic == '/weld_seam/status' and isinstance(body, dict):
             self.algorithm = (
-                f"状态={body.get('status', '?')} · 路径={body.get('path_points', '?')} 点"
+                f"算法={body.get('algorithm', 'corrugated')} · 状态={body.get('status', '?')}"
+                f" · 路径={body.get('path_points', '?')} 点"
                 f" · 总耗时={body.get('total_ms', '?')} ms")
             summary = self.algorithm
         elif topic == '/handeye_bridge/status' and isinstance(body, dict):
