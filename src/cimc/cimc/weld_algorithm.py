@@ -12,7 +12,7 @@ GOOSENECK_ROLES = (
 GOOSENECK_FIELDS = ('dx', 'dy', 'dz', 'roll', 'pitch', 'yaw')
 GOOSENECK_DEFAULTS = {
     'gooseneck.vertical_length_mm': '40', 'gooseneck.clearance_mm': '30',
-    'gooseneck.groove_index': '1', 'gooseneck.tool_x_positive': 'false',
+    'gooseneck.groove_index': '1', 'gooseneck.tool_x_positive': 'true',
     'gooseneck.tool_z_to_body': 'false',
     **{f'gooseneck.{role}.{field}': '0'
        for role, _ in GOOSENECK_ROLES for field in GOOSENECK_FIELDS},

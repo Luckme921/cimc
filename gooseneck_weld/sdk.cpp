@@ -40,7 +40,7 @@ bool boolean(const Settings& s,const std::string& k){
 }
 Settings load(const gooseneck_sdk::RunOptions& o){
  Settings s{{"gooseneck.vertical_length_mm","40"},{"gooseneck.clearance_mm","30"},
- {"gooseneck.tool_x_positive","false"},{"gooseneck.tool_z_to_body","false"},
+ {"gooseneck.tool_x_positive","true"},{"gooseneck.tool_z_to_body","false"},
  {"gooseneck.groove_index","1"},{"roi.enable","false"}};
  for(char a:std::string("xyz")){s[std::string("roi.min_")+a]="-inf";s[std::string("roi.max_")+a]="inf";}
  for(const auto& r:roles)for(const auto& f:fields)s["gooseneck."+r+"."+f]="0";
@@ -116,7 +116,7 @@ void writeCloud(const fs::path& target,const pcl::PointCloud<pcl::PointXYZRGB>& 
 }
 }
 
-const char* gooseneck_sdk::version(){return "1.0.0";}
+const char* gooseneck_sdk::version(){return "1.0.1";}
 gooseneck_sdk::RunResult gooseneck_sdk::run(const RunOptions& options){
  RunResult result;const auto start=std::chrono::steady_clock::now();
  try{

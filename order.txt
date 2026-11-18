@@ -897,7 +897,8 @@ ros2 launch cimc camera_weld_operator_abb.launch.py workflow_mode:=manual
 # 偏移字段gooseneck.<角色>.dx/dy/dz沿相机轴(mm)，roll/pitch/yaw绕
 # 工具局部轴(°)。角色：safe_start,weld_start,corner_1..4,weld_end,safe_end。
 # vertical_length_mm是两端竖缝高度上限，不是路径总长；clearance_mm是安全退距。
-# tool_x_positive=false反向Win移植包X/Y，Z不变；true复现原始工具X。
+# tool_x_positive=true为当前默认，保留原包X并匹配当前TCP方向；
+# false仅供明确需要反向时对比，反向X/Y而保持Z不变。
 # 尚未进行真实硬件验证；首次发送前需核对TCP轴、槽号与姿态。
 
 # 16.1 完全离线：读取ROS YAML生成PLY/CSV；不启动相机或ABB
@@ -910,9 +911,9 @@ python3 scripts/offline_weld.py \
 # 临时比较X方向（不写正式YAML）：
 python3 scripts/offline_weld.py \
   /home/mini/scut_weld_data/pointclouds/live_20261104_160336_814.ply \
-  /home/mini/x86_ros2_ws/operator_sessions/gooseneck_manual original_x \
+  /home/mini/x86_ros2_ws/operator_sessions/gooseneck_manual reversed_x \
   --yaml /home/mini/x86_ros2_ws/src/weld_seam_perception/config/gooseneck.yaml \
-  --set gooseneck.tool_x_positive=true
+  --set gooseneck.tool_x_positive=false
 # 其他临时参数示例：--set gooseneck.corner_2.dx=1.5
 # --set gooseneck.corner_2.pitch=5 --set gooseneck.vertical_length_mm=30
 # 双槽样本选第二槽：文件用live_20261104_160017_391.ply，并加

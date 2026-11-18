@@ -49,7 +49,9 @@ def main():
         out = Path(folder)
         ply = DATA / 'live_20261104_160336_814.ply'
         original = run(ply, out, 'original', 'gooseneck.tool_x_positive=true')
-        flipped = run(ply, out, 'flipped')
+        current = run(ply, out, 'current_default')
+        assert current == original, 'production default must preserve portable +X'
+        flipped = run(ply, out, 'flipped', 'gooseneck.tool_x_positive=false')
         assert len(original) == len(flipped) == 8
         assert [row['weld_enabled'] for row in flipped] == ['0', '1', '1', '1', '1', '1', '1', '0']
         for a, b in zip(original, flipped):
@@ -58,15 +60,17 @@ def main():
             assert np.allclose(ma[:, 2], mb[:, 2], atol=1e-8)
             assert np.allclose(ma[:, 0], -mb[:, 0], atol=1e-8)
             assert np.allclose(ma[:, 1], -mb[:, 1], atol=1e-8)
-        repeated = run(ply, out, 'repeated')
+        repeated = run(ply, out, 'repeated', 'gooseneck.tool_x_positive=false')
         assert repeated == flipped, 'non-deterministic output'
-        z_reversed = run(ply, out, 'z_reversed', 'gooseneck.tool_z_to_body=true')
+        z_reversed = run(ply, out, 'z_reversed', 'gooseneck.tool_z_to_body=true',
+                         'gooseneck.tool_x_positive=false')
         for a, b in zip(flipped, z_reversed):
             assert np.allclose(axes(a)[:, 2], -axes(b)[:, 2], atol=1e-8)
             assert np.allclose([float(a[f'world_torch_body_axis_{axis}']) for axis in 'xyz'],
                                [float(b[f'world_torch_body_axis_{axis}']) for axis in 'xyz'])
         offset = run(ply, out, 'offset', 'gooseneck.corner_2.dx=1.25',
-                     'gooseneck.corner_2.roll=7', 'gooseneck.weld_start.dz=2')
+                     'gooseneck.corner_2.roll=7', 'gooseneck.weld_start.dz=2',
+                     'gooseneck.tool_x_positive=false')
         for i, (a, b) in enumerate(zip(flipped, offset)):
             delta = np.array([float(b[k])-float(a[k]) for k in 'xyz'])
             expected = [1.25, 0, 0] if i == 3 else ([0, 0, 2] if i in (0, 1) else [0, 0, 0])

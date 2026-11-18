@@ -29,10 +29,10 @@ weld_seam_node:
       - "gooseneck.vertical_length_mm=40"
       # 沿两端开放侧的退让距离，默认30mm。不会改变角点位置。
       - "gooseneck.clearance_mm=30"
-      # false：反向移植包的工具X；Y同时反向，Z不变(绕工具Z转180°)。
-      # true：复现Win移植包的原始工具X。两个工件的workpiece X命名
-      # 不保证物理方向相同，真机前必须与当前ABB TCP定义核对。
-      - "gooseneck.tool_x_positive=false"
+      # true：保留Win移植包工具X。当前手眼矩阵+历史样本验证此方向与
+      # 现用TCP的+X同向；false会反向X/Y而保持Z不变(绕工具Z转180°)。
+      # 相机、TCP、标定沿用原系统；不能仅因工件轴名称不同就翻转工具轴。
+      - "gooseneck.tool_x_positive=true"
       # false：+Z为枪体→TCP，与当前现场工具+Z约定一致。
       - "gooseneck.tool_z_to_body=false"
       # 每点平移沿相机XYZ，单位mm；roll/pitch/yaw依次绕当前工具局部

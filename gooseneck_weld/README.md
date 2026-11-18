@@ -1,4 +1,4 @@
-# 鹅颈槽焊缝 SDK 1.0.0
+# 鹅颈槽焊缝 SDK 1.0.1
 
 Ubuntu 22.04 / ROS 2 Humble 的独立 C++ SDK，与波纹板 SDK 分开安装。来自用户在 Windows 验证的移植包，提取核心保留原来的几何逻辑。原始压缩包存于 [upstream](upstream/gooseneck_weld_portable.zip)，SHA256：`a0c5b9b7b4df92ece23932858db069263927120d4a213e04cc90c508be37b601`。桌面原文件未修改。
 
@@ -41,7 +41,7 @@ Ubuntu 22.04 / ROS 2 Humble 的独立 C++ SDK，与波纹板 SDK 分开安装。
 
 焊点从本次筛选的红色样本中取近邻，有支撑距离检查；它们不是凭空生成的理想交点。安全点为计算点。位置补偿后目标会离开原始测量位置；CSV保存 `raw_*` 和实际偏移以便核对。原包将P7的weld_enabled写为0；集成CSV按“是否为焊点”统一为P2–P7=1。这不是起弧控制指令，ABB仍按既有程序决定动作。
 
-`gooseneck.tool_x_positive=false` 是本次新配置的默认值，使工具X相对原包反向、Y同步反向、Z不变（绕工具Z旋转180°），保证旋转矩阵仍为右手系。`true` 复现原包工具X；切换不改变点位。不能从两个算法里“workpiece X”这个名称直接推断实际TCP一致。新旧X方向的结果都已生成，首次机械臂联调需用它们核对示教器实际TCP轴。
+`gooseneck.tool_x_positive=true` 是1.0.1起的默认值，保留原包工具X。按当前手眼矩阵，历史样本的该轴与拍照TCP +X点积约+0.941；此前1.0.0默认反向时约−0.941，会引入不必要的近反向姿态，因此已纠正。`false` 仍可主动反向工具X/Y、保持Z不变（绕工具Z旋转180°），切换不改变零补偿点位。不能从两个算法里“workpiece X”这个名称直接推断实际TCP一致；物理相机安装、TCP和标定沿用原系统，首次联调仍需核对实际目标姿态。
 
 `gooseneck.tool_z_to_body=false` 表示 +Z 从枪体指向TCP；true相反。零角补偿时所有点使用原包的同一共享框架；每点roll、pitch、yaw依次绕当前工具局部X、Y、Z旋转，单位度。改变工具X符号也会改变局部轴角补偿的物理含义，应先确定轴向再调角。
 
@@ -81,7 +81,7 @@ python3 scripts/offline_weld.py \
   --yaml src/weld_seam_perception/config/gooseneck.yaml
 ```
 
-同一命令加 `--set gooseneck.tool_x_positive=true`、更换前缀为 `original_x` 可对比X方向。补偿示例：`--set gooseneck.corner_2.dx=1.5 --set gooseneck.corner_2.pitch=5`。双槽用 `live_20261104_160017_391.ply`，加 `--set gooseneck.groove_index=2`。这些临时覆盖不修改正式YAML。
+同一命令加 `--set gooseneck.tool_x_positive=false`、更换前缀为 `reversed_x` 可对比反向X。补偿示例：`--set gooseneck.corner_2.dx=1.5 --set gooseneck.corner_2.pitch=5`。双槽用 `live_20261104_160017_391.ply`，加 `--set gooseneck.groove_index=2`。这些临时覆盖不修改正式YAML。
 
 输出 `<前缀>_features.csv`、`_result.ply`、`_feature_points.ply`、`_settings.conf`。settings记录实际ROI/补偿/方向和检测到的槽数。CSV包含槽号、角色、原始和补偿位置、四元数、工具X及物理枪体轴。result.ply保留分割颜色和红色焊缝，只叠加所选槽的轨迹；黄绿色箭头为工具+X、白线为物理枪体方向。
 
@@ -102,6 +102,6 @@ ros2 launch cimc camera_weld_operator_abb.launch.py \
 
 `python3 gooseneck_weld/tests/regression.py` 从原始zip编译基线，比较四份真实点云（两单槽、两双槽），每个槽的XYZ和原X姿态一致；另验证X/Y翻转、Z保持、四元数单位长度和右手性、逐点补偿、竖缝长度、安全退距、确定性和无效槽号拒绝。两份不满足参考平面条件的样本在原包和新SDK中均拒绝，未把它们计为成功。
 
-结果放在工作区 `operator_sessions/gooseneck_integration/`，包含上述四组及双槽第二槽、新旧X方向对比。`test/offline_backends.py` 位于ROS适配包下，使用隔离ROS域224，仅运行算法节点和测试订阅器，核对话题和离线CLI结果一致；不会运行相机、手眼、ABB接收或执行器节点。
+1.0.0结果在 `operator_sessions/gooseneck_integration/`，其single默认X为旧的反向候选；1.0.1当前TCP约定下的结果在 `operator_sessions/gooseneck_same_tcp_validation/`，请优先查看该目录。`test/offline_backends.py` 位于ROS适配包下，使用隔离ROS域224，仅运行算法节点和测试订阅器，核对话题和离线CLI结果一致；不会运行相机、手眼、ABB接收或执行器节点。`src/cimc/test/test_gooseneck_tcp_contract.py` 另使用生产桥接回调、当前手眼和模拟拍照位姿在内存中验证8点到ABB毫米/wxyz文本，全部发布器为内存记录器，不创建ROS节点或socket。
 
 编译、软件回归与离线ROS接口验证不能验证实际TCP定义、ABB逆解或碰撞。尚未进行真实硬件验证。

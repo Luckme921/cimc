@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(gooseneck_sdk VERSION 1.0.0 LANGUAGES C CXX)
+project(gooseneck_sdk VERSION 1.0.1 LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 find_package(PCL REQUIRED COMPONENTS common io)
